@@ -320,30 +320,33 @@ jobs:
           mkdir -p "$DMG_STAGE_DIR"
           ditto "$APP_PATH" "$DMG_STAGE_DIR/CC Switch.app"
 
-          CREATE_DMG_ARGS=()
+          CREATE_DMG_CMD=(
+            create-dmg
+            --volname "CC Switch"
+            --background "src-tauri/icons/dmg-background.png"
+            --window-size 660 400
+            --window-pos 200 120
+            --icon-size 80
+            --icon "CC Switch.app" 180 220
+            --hide-extension "CC Switch.app"
+            --app-drop-link 480 220
+          )
           if [ "${{ steps.release-mode.outputs.has_apple_signing }}" = "true" ]; then
             if [ -z "${APPLE_SIGNING_IDENTITY:-}" ]; then
               echo "❌ APPLE_SIGNING_IDENTITY is missing before signed DMG creation" >&2
               exit 1
             fi
-            CREATE_DMG_ARGS+=(--codesign "$APPLE_SIGNING_IDENTITY")
+            CREATE_DMG_CMD+=(--codesign "$APPLE_SIGNING_IDENTITY")
           else
             echo "⚠️ Creating unsigned DMG"
           fi
 
-          create-dmg \
-            --volname "CC Switch" \
-            --background "src-tauri/icons/dmg-background.png" \
-            --window-size 660 400 \
-            --window-pos 200 120 \
-            --icon-size 80 \
-            --icon "CC Switch.app" 180 220 \
-            --hide-extension "CC Switch.app" \
-            --app-drop-link 480 220 \
-            "${CREATE_DMG_ARGS[@]}" \
-            --no-internet-enable \
-            "release-assets/$NEW_DMG" \
+          CREATE_DMG_CMD+=(
+            --no-internet-enable
+            "release-assets/$NEW_DMG"
             "$DMG_STAGE_DIR"
+          )
+          "${CREATE_DMG_CMD[@]}"
 
           rm -rf "$DMG_STAGE_DIR"
           echo "✅ Styled DMG created: $NEW_DMG"
