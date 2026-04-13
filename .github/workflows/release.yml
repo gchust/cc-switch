@@ -3,7 +3,7 @@ name: Release
 on:
   push:
     tags:
-      - 'v*'
+      - 'v*-fork.*'
 
 permissions:
   contents: write
@@ -521,6 +521,16 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Derive release metadata
+        id: release-meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          FORK_TAG="${GITHUB_REF_NAME}"
+          UPSTREAM_TAG="${FORK_TAG%-fork.*}"
+          echo "fork_tag=$FORK_TAG" >> "$GITHUB_OUTPUT"
+          echo "upstream_tag=$UPSTREAM_TAG" >> "$GITHUB_OUTPUT"
+
       - name: Download built release artifacts
         uses: actions/download-artifact@v8
         with:
@@ -538,19 +548,21 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
-          name: CC Switch ${{ github.ref_name }}
+          name: CC Switch ${{ steps.release-meta.outputs.fork_tag }}
           prerelease: true
           body: |
-            ## CC Switch ${{ github.ref_name }}
+            ## CC Switch ${{ steps.release-meta.outputs.fork_tag }}
+
+            Fork release based on upstream `${{ steps.release-meta.outputs.upstream_tag }}`.
 
             Claude Code 供应商切换工具
 
             ### 下载
 
-            - **macOS**: `CC-Switch-${{ github.ref_name }}-macOS.dmg`（推荐）或 `CC-Switch-${{ github.ref_name }}-macOS.zip`（解压即用）
-            - **Windows**: `CC-Switch-${{ github.ref_name }}-Windows.msi`（安装版）或 `CC-Switch-${{ github.ref_name }}-Windows-Portable.zip`（绿色版）
-            - **Linux (x86_64)**: `CC-Switch-${{ github.ref_name }}-Linux-x86_64.AppImage` / `.deb` / `.rpm`
-            - **Linux (ARM64)**: `CC-Switch-${{ github.ref_name }}-Linux-arm64.AppImage` / `.deb` / `.rpm`
+            - **macOS**: `CC-Switch-${{ steps.release-meta.outputs.fork_tag }}-macOS.dmg`（推荐）或 `CC-Switch-${{ steps.release-meta.outputs.fork_tag }}-macOS.zip`（解压即用）
+            - **Windows**: `CC-Switch-${{ steps.release-meta.outputs.fork_tag }}-Windows.msi`（安装版）或 `CC-Switch-${{ steps.release-meta.outputs.fork_tag }}-Windows-Portable.zip`（绿色版）
+            - **Linux (x86_64)**: `CC-Switch-${{ steps.release-meta.outputs.fork_tag }}-Linux-x86_64.AppImage` / `.deb` / `.rpm`
+            - **Linux (ARM64)**: `CC-Switch-${{ steps.release-meta.outputs.fork_tag }}-Linux-arm64.AppImage` / `.deb` / `.rpm`
 
             > `.tar.gz` 为 Tauri updater 自动更新专用，无需手动下载。
 
@@ -588,6 +600,7 @@ jobs:
         run: |
           set -euo pipefail
           VERSION="${TAG#v}"
+          UPSTREAM_TAG="${TAG%-fork.*}"
           PUB_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
           base_url="https://github.com/$REPO/releases/download/$TAG"
           # 初始化空平台映射
@@ -618,7 +631,7 @@ jobs:
           {
             echo '{'
             echo "  \"version\": \"$VERSION\",";
-            echo "  \"notes\": \"Release $TAG\",";
+            echo "  \"notes\": \"Fork release $TAG (upstream $UPSTREAM_TAG)\",";
             echo "  \"pub_date\": \"$PUB_DATE\",";
             echo '  "platforms": {'
             first=1

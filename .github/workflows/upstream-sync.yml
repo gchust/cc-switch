@@ -1,0 +1,180 @@
+name: Upstream Release Sync
+
+on:
+  schedule:
+    - cron: '23 */6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: upstream-release-sync
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_REPO: farion1231/cc-switch
+  MIRROR_BRANCH: main
+  CUSTOM_BRANCH: custom/main
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout mirror branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: main
+
+      - name: Configure git identity
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Resolve upstream release
+        id: release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          release_tag="$(gh api "repos/${UPSTREAM_REPO}/releases/latest" --jq .tag_name)"
+          if [ -z "$release_tag" ] || [ "$release_tag" = "null" ]; then
+            echo "::error::Unable to resolve the latest upstream release tag."
+            exit 1
+          fi
+          echo "tag=$release_tag" >> "$GITHUB_OUTPUT"
+
+      - name: Fetch origin and upstream refs
+        id: fetch
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if git remote get-url upstream >/dev/null 2>&1; then
+            git remote set-url upstream "https://github.com/${UPSTREAM_REPO}.git"
+          else
+            git remote add upstream "https://github.com/${UPSTREAM_REPO}.git"
+          fi
+
+          git fetch --no-tags origin \
+            "+refs/heads/${MIRROR_BRANCH}:refs/remotes/origin/${MIRROR_BRANCH}"
+
+          custom_exists=false
+          if git ls-remote --exit-code --heads origin "${CUSTOM_BRANCH}" >/dev/null 2>&1; then
+            custom_exists=true
+            git fetch --no-tags origin \
+              "+refs/heads/${CUSTOM_BRANCH}:refs/remotes/origin/${CUSTOM_BRANCH}"
+          fi
+
+          git fetch upstream \
+            "+refs/heads/main:refs/remotes/upstream/main" \
+            "+refs/tags/${{ steps.release.outputs.tag }}:refs/tags/${{ steps.release.outputs.tag }}"
+
+          sync_sha="$(git rev-list -n 1 "${{ steps.release.outputs.tag }}")"
+          if [ -z "$sync_sha" ]; then
+            echo "::error::Unable to resolve commit for upstream tag ${{ steps.release.outputs.tag }}."
+            exit 1
+          fi
+
+          echo "custom_exists=$custom_exists" >> "$GITHUB_OUTPUT"
+          echo "sync_sha=$sync_sha" >> "$GITHUB_OUTPUT"
+
+      - name: Fast-forward mirror branch to upstream release
+        id: mirror
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          origin_main_sha="$(git rev-parse "origin/${MIRROR_BRANCH}")"
+          sync_sha="${{ steps.fetch.outputs.sync_sha }}"
+
+          if [ "$origin_main_sha" = "$sync_sha" ]; then
+            echo "updated=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if ! git merge-base --is-ancestor "$origin_main_sha" "$sync_sha"; then
+            echo "::error::origin/${MIRROR_BRANCH} is not an ancestor of ${sync_sha}. Refusing non-fast-forward sync."
+            exit 1
+          fi
+
+          git push origin "${sync_sha}:refs/heads/${MIRROR_BRANCH}"
+          echo "updated=true" >> "$GITHUB_OUTPUT"
+
+      - name: Mirror upstream release tag
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          release_tag="${{ steps.release.outputs.tag }}"
+          sync_sha="${{ steps.fetch.outputs.sync_sha }}"
+
+          if git ls-remote --exit-code --tags origin "refs/tags/${release_tag}" >/dev/null 2>&1; then
+            origin_tag_sha="$(git ls-remote origin "refs/tags/${release_tag}^{}" | awk 'NR==1 {print $1}')"
+            if [ -z "$origin_tag_sha" ]; then
+              origin_tag_sha="$(git ls-remote origin "refs/tags/${release_tag}" | awk 'NR==1 {print $1}')"
+            fi
+            if [ "$origin_tag_sha" != "$sync_sha" ]; then
+              echo "::error::Origin tag ${release_tag} already exists but points to ${origin_tag_sha}, expected ${sync_sha}."
+              exit 1
+            fi
+            exit 0
+          fi
+
+          git push origin "refs/tags/${release_tag}:refs/tags/${release_tag}"
+
+      - name: Bootstrap custom branch
+        if: steps.fetch.outputs.custom_exists != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sync_sha="${{ steps.fetch.outputs.sync_sha }}"
+          git push origin "${sync_sha}:refs/heads/${CUSTOM_BRANCH}"
+          echo "Created ${CUSTOM_BRANCH} from upstream release ${{ steps.release.outputs.tag }}."
+
+      - name: Create or update sync pull request
+        if: steps.fetch.outputs.custom_exists == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          sync_sha="${{ steps.fetch.outputs.sync_sha }}"
+          custom_sha="$(git rev-parse "origin/${CUSTOM_BRANCH}")"
+
+          if git merge-base --is-ancestor "$sync_sha" "$custom_sha"; then
+            echo "custom branch already contains ${sync_sha}; nothing to sync."
+            exit 0
+          fi
+
+          title="chore(sync): merge upstream ${{ steps.release.outputs.tag }} into ${CUSTOM_BRANCH}"
+          body=$(cat <<EOF
+          <!-- upstream-sync -->
+          This PR syncs the latest upstream release into \`${CUSTOM_BRANCH}\`.
+
+          - Upstream-Repo: ${UPSTREAM_REPO}
+          - Upstream-Release: ${{ steps.release.outputs.tag }}
+          - Upstream-Commit: ${sync_sha}
+          - Mirror-Branch: ${MIRROR_BRANCH}
+
+          Merge this PR into \`${CUSTOM_BRANCH}\` to trigger the fork release tag workflow.
+          EOF
+          )
+
+          pr_number="$(gh pr list \
+            --base "${CUSTOM_BRANCH}" \
+            --head "${MIRROR_BRANCH}" \
+            --state open \
+            --json number \
+            --jq '.[0].number // empty')"
+
+          if [ -n "$pr_number" ]; then
+            gh pr edit "$pr_number" --title "$title" --body "$body"
+          else
+            gh pr create --base "${CUSTOM_BRANCH}" --head "${MIRROR_BRANCH}" --title "$title" --body "$body"
+          fi

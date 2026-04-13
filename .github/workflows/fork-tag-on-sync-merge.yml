@@ -1,0 +1,78 @@
+name: Tag Fork Release
+
+on:
+  pull_request_target:
+    types:
+      - closed
+
+permissions:
+  contents: write
+
+env:
+  CUSTOM_BRANCH: custom/main
+  MIRROR_BRANCH: main
+
+jobs:
+  tag:
+    if: >
+      github.event.pull_request.merged == true &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.head.ref == 'main' &&
+      github.event.pull_request.base.ref == 'custom/main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout custom branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: custom/main
+
+      - name: Configure git identity
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Create next fork release tag
+        shell: bash
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+          MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
+        run: |
+          set -euo pipefail
+
+          release_tag="$(printf '%s\n' "$PR_BODY" | sed -n 's/^- Upstream-Release: //p' | head -n1)"
+          if [ -z "$release_tag" ]; then
+            echo "::error::Missing upstream release marker in sync PR body."
+            exit 1
+          fi
+
+          git fetch --tags origin
+          git fetch --no-tags origin \
+            "+refs/heads/${CUSTOM_BRANCH}:refs/remotes/origin/${CUSTOM_BRANCH}"
+
+          if ! git merge-base --is-ancestor "$MERGE_SHA" "origin/${CUSTOM_BRANCH}"; then
+            echo "::error::Merge commit ${MERGE_SHA} is not on origin/${CUSTOM_BRANCH}."
+            exit 1
+          fi
+
+          prefix="${release_tag}-fork."
+          max_suffix=0
+          while IFS= read -r tag; do
+            [ -z "$tag" ] && continue
+            suffix="${tag##*.}"
+            if [[ "$suffix" =~ ^[0-9]+$ ]] && [ "$suffix" -gt "$max_suffix" ]; then
+              max_suffix="$suffix"
+            fi
+          done < <(git tag -l "${prefix}*")
+
+          next_suffix=$((max_suffix + 1))
+          fork_tag="${prefix}${next_suffix}"
+
+          if git ls-remote --exit-code --tags origin "refs/tags/${fork_tag}" >/dev/null 2>&1; then
+            echo "::error::Tag ${fork_tag} already exists on origin."
+            exit 1
+          fi
+
+          git tag "${fork_tag}" "${MERGE_SHA}"
+          git push origin "refs/tags/${fork_tag}"
