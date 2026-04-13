@@ -15,6 +15,9 @@ concurrency:
 jobs:
   release:
     runs-on: macos-14
+    outputs:
+      has_tauri_signing: ${{ steps.release-mode.outputs.has_tauri_signing }}
+      has_apple_signing: ${{ steps.release-mode.outputs.has_apple_signing }}
 
     steps:
       - name: Checkout
@@ -27,6 +30,46 @@ jobs:
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Detect release signing mode
+        id: release-mode
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          has_tauri_signing=false
+          if [ -n "${TAURI_SIGNING_PRIVATE_KEY:-}" ]; then
+            has_tauri_signing=true
+          fi
+
+          has_apple_signing=false
+          if [ -n "${APPLE_CERTIFICATE:-}" ] \
+            && [ -n "${APPLE_CERTIFICATE_PASSWORD:-}" ] \
+            && [ -n "${APPLE_ID:-}" ] \
+            && [ -n "${APPLE_PASSWORD:-}" ] \
+            && [ -n "${APPLE_TEAM_ID:-}" ] \
+            && [ -n "${KEYCHAIN_PASSWORD:-}" ]; then
+            has_apple_signing=true
+          fi
+
+          echo "has_tauri_signing=$has_tauri_signing" >> "$GITHUB_OUTPUT"
+          echo "has_apple_signing=$has_apple_signing" >> "$GITHUB_OUTPUT"
+
+          if [ "$has_tauri_signing" != "true" ]; then
+            echo "::warning::TAURI_SIGNING_PRIVATE_KEY is missing. The release will not publish updater metadata."
+          fi
+
+          if [ "$has_apple_signing" != "true" ]; then
+            echo "::warning::Apple signing/notarization secrets are missing. The release will publish unsigned macOS artifacts."
+          fi
 
       - name: Add macOS targets
         run: |
@@ -54,6 +97,7 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Prepare Tauri signing key
+        if: steps.release-mode.outputs.has_tauri_signing == 'true'
         shell: bash
         run: |
           # 调试：检查 Secret 是否存在
@@ -110,6 +154,7 @@ jobs:
           echo "✅ Tauri signing key prepared"
 
       - name: Import Apple signing certificate
+        if: steps.release-mode.outputs.has_apple_signing == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -160,6 +205,12 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           set -euo pipefail
+          if [ "${{ steps.release-mode.outputs.has_apple_signing }}" = "true" ]; then
+            echo "✅ Building signed/notarized macOS artifacts"
+          else
+            echo "⚠️ Building unsigned macOS artifacts"
+          fi
+
           max_attempts=3
           for attempt in $(seq 1 "$max_attempts"); do
             echo "=== macOS build/notarization attempt ${attempt}/${max_attempts} ==="
@@ -223,17 +274,23 @@ jobs:
           echo "macOS zip ready: $NEW_ZIP"
 
           # 3) Create styled DMG with create-dmg (Tauri's built-in DMG styling doesn't work on CI)
-          if [ -z "${APPLE_SIGNING_IDENTITY:-}" ]; then
-            echo "❌ APPLE_SIGNING_IDENTITY is missing before DMG creation" >&2
-            exit 1
-          fi
-
           HOMEBREW_NO_AUTO_UPDATE=1 brew install create-dmg
           NEW_DMG="CC-Switch-${VERSION}-macOS.dmg"
           DMG_STAGE_DIR="$RUNNER_TEMP/dmg-stage"
           rm -rf "$DMG_STAGE_DIR"
           mkdir -p "$DMG_STAGE_DIR"
           ditto "$APP_PATH" "$DMG_STAGE_DIR/CC Switch.app"
+
+          CREATE_DMG_ARGS=()
+          if [ "${{ steps.release-mode.outputs.has_apple_signing }}" = "true" ]; then
+            if [ -z "${APPLE_SIGNING_IDENTITY:-}" ]; then
+              echo "❌ APPLE_SIGNING_IDENTITY is missing before signed DMG creation" >&2
+              exit 1
+            fi
+            CREATE_DMG_ARGS+=(--codesign "$APPLE_SIGNING_IDENTITY")
+          else
+            echo "⚠️ Creating unsigned DMG"
+          fi
 
           create-dmg \
             --volname "CC Switch" \
@@ -244,7 +301,7 @@ jobs:
             --icon "CC Switch.app" 180 220 \
             --hide-extension "CC Switch.app" \
             --app-drop-link 480 220 \
-            --codesign "$APPLE_SIGNING_IDENTITY" \
+            "${CREATE_DMG_ARGS[@]}" \
             --no-internet-enable \
             "release-assets/$NEW_DMG" \
             "$DMG_STAGE_DIR"
@@ -253,6 +310,7 @@ jobs:
           echo "✅ Styled DMG created: $NEW_DMG"
 
       - name: Notarize macOS DMG
+        if: steps.release-mode.outputs.has_apple_signing == 'true'
         shell: bash
         timeout-minutes: 30
         env:
@@ -294,6 +352,7 @@ jobs:
           done
 
       - name: Verify macOS code signing and notarization
+        if: steps.release-mode.outputs.has_apple_signing == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -384,12 +443,36 @@ jobs:
       - name: Derive release metadata
         id: release-meta
         shell: bash
+        env:
+          HAS_TAURI_SIGNING: ${{ needs.release.outputs.has_tauri_signing }}
+          HAS_APPLE_SIGNING: ${{ needs.release.outputs.has_apple_signing }}
         run: |
           set -euo pipefail
           FORK_TAG="${GITHUB_REF_NAME}"
           UPSTREAM_TAG="${FORK_TAG%-fork.*}"
           echo "fork_tag=$FORK_TAG" >> "$GITHUB_OUTPUT"
           echo "upstream_tag=$UPSTREAM_TAG" >> "$GITHUB_OUTPUT"
+
+          if [ "$HAS_TAURI_SIGNING" = "true" ]; then
+            updater_note='`.tar.gz` 为 Tauri updater 自动更新专用，无需手动下载。'
+          else
+            updater_note='当前仓库未配置 Tauri updater 签名 secret，本次不会发布 `latest.json` 自动更新元数据。'
+          fi
+
+          if [ "$HAS_APPLE_SIGNING" = "true" ]; then
+            signing_note='macOS 版本已通过 Apple 代码签名和公证，可直接安装使用。'
+          else
+            signing_note='当前仓库未配置 Apple 签名/公证 secrets，本次发布的是未签名 macOS 构建。'
+          fi
+
+          {
+            echo "updater_note<<EOF"
+            echo "$updater_note"
+            echo "EOF"
+            echo "signing_note<<EOF"
+            echo "$signing_note"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Download built release artifacts
         uses: actions/download-artifact@v8
@@ -421,18 +504,21 @@ jobs:
 
             - **macOS**: `CC-Switch-${{ steps.release-meta.outputs.fork_tag }}-macOS.dmg`（推荐）或 `CC-Switch-${{ steps.release-meta.outputs.fork_tag }}-macOS.zip`（解压即用）
 
-            > `.tar.gz` 为 Tauri updater 自动更新专用，无需手动下载。
+            > ${{ steps.release-meta.outputs.updater_note }}
 
             ---
-            macOS 版本已通过 Apple 代码签名和公证，可直接安装使用。
+            ${{ steps.release-meta.outputs.signing_note }}
           files: release-assets/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   assemble-latest-json:
     name: Assemble latest.json
+    if: needs.release.outputs.has_tauri_signing == 'true'
     runs-on: ubuntu-22.04
-    needs: publish-release
+    needs:
+      - release
+      - publish-release
     permissions:
       contents: write
     steps:
