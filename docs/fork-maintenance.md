@@ -27,8 +27,9 @@ This fork keeps upstream sync and local customization on separate long-lived bra
 
 1. Create `custom/main` from `main` if it does not already exist.
 2. Change the repository default branch to `custom/main`.
-3. Protect `main` from manual pushes and keep it reserved for automation.
-4. Allow GitHub Actions to push to `main` and to create tags.
-5. Keep normal PR review rules on `custom/main`.
+3. Keep `main` reserved for upstream sync automation and avoid using it for local feature work.
+4. Keep normal PR review rules on `custom/main`.
 
 The sync workflow can bootstrap `custom/main` automatically on the first run, but changing the default branch still needs to be done in the repository settings.
+
+For personal-account repositories, GitHub does not support allowing only Actions to bypass branch protection on `main`. If you need strict "automation only" enforcement, move the repository to an organization or use a dedicated owner token with a protection strategy that fits your security requirements.
