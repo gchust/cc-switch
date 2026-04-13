@@ -70,18 +70,25 @@ jobs:
               "+refs/heads/${CUSTOM_BRANCH}:refs/remotes/origin/${CUSTOM_BRANCH}"
           fi
 
-          git fetch upstream \
+          git fetch --no-tags upstream \
             "+refs/heads/main:refs/remotes/upstream/main" \
             "+refs/tags/${{ steps.release.outputs.tag }}:refs/tags/${{ steps.release.outputs.tag }}"
 
-          sync_sha="$(git rev-list -n 1 "${{ steps.release.outputs.tag }}")"
-          if [ -z "$sync_sha" ]; then
+          release_sha="$(git rev-list -n 1 "${{ steps.release.outputs.tag }}")"
+          if [ -z "$release_sha" ]; then
             echo "::error::Unable to resolve commit for upstream tag ${{ steps.release.outputs.tag }}."
             exit 1
           fi
 
+          mirror_sha="$(git rev-parse "refs/remotes/upstream/main")"
+          if [ -z "$mirror_sha" ]; then
+            echo "::error::Unable to resolve upstream/main."
+            exit 1
+          fi
+
           echo "custom_exists=$custom_exists" >> "$GITHUB_OUTPUT"
-          echo "sync_sha=$sync_sha" >> "$GITHUB_OUTPUT"
+          echo "release_sha=$release_sha" >> "$GITHUB_OUTPUT"
+          echo "mirror_sha=$mirror_sha" >> "$GITHUB_OUTPUT"
 
       - name: Fast-forward mirror branch to upstream release
         id: mirror
@@ -90,19 +97,19 @@ jobs:
           set -euo pipefail
 
           origin_main_sha="$(git rev-parse "origin/${MIRROR_BRANCH}")"
-          sync_sha="${{ steps.fetch.outputs.sync_sha }}"
+          mirror_sha="${{ steps.fetch.outputs.mirror_sha }}"
 
-          if [ "$origin_main_sha" = "$sync_sha" ]; then
+          if [ "$origin_main_sha" = "$mirror_sha" ]; then
             echo "updated=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          if ! git merge-base --is-ancestor "$origin_main_sha" "$sync_sha"; then
-            echo "::error::origin/${MIRROR_BRANCH} is not an ancestor of ${sync_sha}. Refusing non-fast-forward sync."
+          if ! git merge-base --is-ancestor "$origin_main_sha" "$mirror_sha"; then
+            echo "::error::origin/${MIRROR_BRANCH} is not an ancestor of ${mirror_sha}. Refusing non-fast-forward sync."
             exit 1
           fi
 
-          git push origin "${sync_sha}:refs/heads/${MIRROR_BRANCH}"
+          git push origin "${mirror_sha}:refs/heads/${MIRROR_BRANCH}"
           echo "updated=true" >> "$GITHUB_OUTPUT"
 
       - name: Mirror upstream release tag
@@ -111,15 +118,15 @@ jobs:
           set -euo pipefail
 
           release_tag="${{ steps.release.outputs.tag }}"
-          sync_sha="${{ steps.fetch.outputs.sync_sha }}"
+          release_sha="${{ steps.fetch.outputs.release_sha }}"
 
           if git ls-remote --exit-code --tags origin "refs/tags/${release_tag}" >/dev/null 2>&1; then
             origin_tag_sha="$(git ls-remote origin "refs/tags/${release_tag}^{}" | awk 'NR==1 {print $1}')"
             if [ -z "$origin_tag_sha" ]; then
               origin_tag_sha="$(git ls-remote origin "refs/tags/${release_tag}" | awk 'NR==1 {print $1}')"
             fi
-            if [ "$origin_tag_sha" != "$sync_sha" ]; then
-              echo "::error::Origin tag ${release_tag} already exists but points to ${origin_tag_sha}, expected ${sync_sha}."
+            if [ "$origin_tag_sha" != "$release_sha" ]; then
+              echo "::error::Origin tag ${release_tag} already exists but points to ${origin_tag_sha}, expected ${release_sha}."
               exit 1
             fi
             exit 0
@@ -132,8 +139,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          sync_sha="${{ steps.fetch.outputs.sync_sha }}"
-          git push origin "${sync_sha}:refs/heads/${CUSTOM_BRANCH}"
+          mirror_sha="${{ steps.fetch.outputs.mirror_sha }}"
+          git push origin "${mirror_sha}:refs/heads/${CUSTOM_BRANCH}"
           echo "Created ${CUSTOM_BRANCH} from upstream release ${{ steps.release.outputs.tag }}."
 
       - name: Create or update sync pull request
@@ -144,11 +151,11 @@ jobs:
         run: |
           set -euo pipefail
 
-          sync_sha="${{ steps.fetch.outputs.sync_sha }}"
+          mirror_sha="${{ steps.fetch.outputs.mirror_sha }}"
           custom_sha="$(git rev-parse "origin/${CUSTOM_BRANCH}")"
 
-          if git merge-base --is-ancestor "$sync_sha" "$custom_sha"; then
-            echo "custom branch already contains ${sync_sha}; nothing to sync."
+          if git merge-base --is-ancestor "$mirror_sha" "$custom_sha"; then
+            echo "custom branch already contains ${mirror_sha}; nothing to sync."
             exit 0
           fi
 
@@ -159,7 +166,7 @@ jobs:
 
           - Upstream-Repo: ${UPSTREAM_REPO}
           - Upstream-Release: ${{ steps.release.outputs.tag }}
-          - Upstream-Commit: ${sync_sha}
+          - Upstream-Commit: ${mirror_sha}
           - Mirror-Branch: ${MIRROR_BRANCH}
 
           Merge this PR into \`${CUSTOM_BRANCH}\` to trigger the fork release tag workflow.

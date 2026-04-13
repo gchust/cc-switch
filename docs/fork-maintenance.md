@@ -17,7 +17,7 @@ This fork keeps upstream sync and local customization on separate long-lived bra
 ## Automated sync flow
 
 1. `Upstream Release Sync` polls the latest release from `farion1231/cc-switch`.
-2. The workflow fast-forwards `main` to the latest upstream release tag commit.
+2. The workflow fast-forwards `main` to the latest `upstream/main` commit.
 3. The matching upstream `vX.Y.Z` tag is mirrored into this fork.
 4. The workflow creates or updates a PR from `main` into `custom/main`.
 5. When that PR is merged, `Tag Fork Release` creates the next fork tag (`vX.Y.Z-fork.N`).
