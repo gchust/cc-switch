@@ -223,6 +223,10 @@ jobs:
             echo "⚠️ Updater signing is unavailable; disabling updater artifacts for this build"
             TAURI_BUILD_ARGS+=(--config "$UNSIGNED_CONFIG_PATH")
           fi
+          if [ "${{ steps.release-mode.outputs.has_apple_signing }}" != "true" ]; then
+            echo "⚠️ Apple signing is unavailable; skipping macOS code signing"
+            TAURI_BUILD_ARGS+=(--no-sign)
+          fi
 
           max_attempts=3
           for attempt in $(seq 1 "$max_attempts"); do
