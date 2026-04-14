@@ -82,11 +82,9 @@ describe("ProviderCard", () => {
     const todayCostButton = screen.getByRole("button", { name: /今日成本/i });
     fireEvent.focus(todayCostButton);
 
-    expect(
-      await screen.findByText(
-        "按本地时区统计今天 00:00 至今，仅包含可归因到当前 Provider 的请求；不等于余额或套餐，也可能不覆盖会话导入、官方直连等场景。",
-      ),
-    ).toBeInTheDocument();
+    expect(await screen.findByRole("tooltip")).toHaveTextContent(
+      "按本地时区统计今天 00:00 至今，仅包含可归因到当前 Provider 的请求；不等于余额或套餐，也可能不覆盖会话导入、官方直连等场景。",
+    );
   });
 
   it("renders zero cost as $0.00", () => {
