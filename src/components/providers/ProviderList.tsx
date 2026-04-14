@@ -131,14 +131,11 @@ export function ProviderList({
     data: providerTodayCosts,
     isLoading: isProviderTodayCostsLoading,
     isError: isProviderTodayCostsError,
-  } = useProviderTodayCosts(
-    supportsTodayCost ? appId : undefined,
-    {
-      enabled: supportsTodayCost,
-      refetchInterval: isProxyRunning ? 30000 : false,
-      refetchIntervalInBackground: true,
-    },
-  );
+  } = useProviderTodayCosts(supportsTodayCost ? appId : undefined, {
+    enabled: supportsTodayCost,
+    refetchInterval: isProxyRunning ? 30000 : false,
+    refetchIntervalInBackground: true,
+  });
 
   const providerTodayCostMap = useMemo(
     () =>

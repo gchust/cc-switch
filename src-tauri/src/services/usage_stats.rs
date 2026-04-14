@@ -135,7 +135,7 @@ fn provider_name_coalesce(log_alias: &str, provider_alias: &str) -> String {
          WHEN '_codex_session' THEN 'Codex (Session)' \
          WHEN '_gemini_session' THEN 'Gemini (Session)' \
          ELSE {log_alias}.provider_id END)"
-        )
+    )
 }
 
 #[derive(Debug, Clone)]
@@ -318,13 +318,15 @@ impl Database {
     ) -> Result<Vec<ProviderTodayCost>, AppError> {
         let conn = lock_conn!(self.conn);
         let range = current_local_day_range()?;
-        Ok(Self::get_provider_costs_by_range(&conn, app_type, &range, None, true)?
-            .into_iter()
-            .map(|(provider_id, total_cost)| ProviderTodayCost {
-                provider_id,
-                total_cost: format!("{total_cost:.6}"),
-            })
-            .collect())
+        Ok(
+            Self::get_provider_costs_by_range(&conn, app_type, &range, None, true)?
+                .into_iter()
+                .map(|(provider_id, total_cost)| ProviderTodayCost {
+                    provider_id,
+                    total_cost: format!("{total_cost:.6}"),
+                })
+                .collect(),
+        )
     }
 
     /// 获取每日趋势（滑动窗口，<=24h 按小时，>24h 按天，窗口与汇总一致）
@@ -1033,8 +1035,7 @@ impl Database {
 
         let mut params_vec = detail_params;
         params_vec.extend(rollup_params);
-        let param_refs: Vec<&dyn rusqlite::ToSql> =
-            params_vec.iter().map(|p| p.as_ref()).collect();
+        let param_refs: Vec<&dyn rusqlite::ToSql> = params_vec.iter().map(|p| p.as_ref()).collect();
 
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map(param_refs.as_slice(), |row| {
