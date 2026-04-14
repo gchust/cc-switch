@@ -4,7 +4,7 @@
 
 use crate::database::{lock_conn, Database};
 use crate::error::AppError;
-use chrono::{Local, TimeZone};
+use chrono::{Datelike, Local, NaiveDate, TimeZone};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -49,6 +49,14 @@ pub struct ProviderStats {
     pub total_cost: String,
     pub success_rate: f32,
     pub avg_latency_ms: u64,
+}
+
+/// Provider 今日成本
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderTodayCost {
+    pub provider_id: String,
+    pub total_cost: String,
 }
 
 /// 模型统计
@@ -128,6 +136,59 @@ fn provider_name_coalesce(log_alias: &str, provider_alias: &str) -> String {
          WHEN '_gemini_session' THEN 'Gemini (Session)' \
          ELSE {log_alias}.provider_id END)"
     )
+}
+
+#[derive(Debug, Clone)]
+struct AggregationRange {
+    start_ts: i64,
+    end_ts: i64,
+    start_date: String,
+    end_date_exclusive: String,
+}
+
+fn local_midnight_timestamp(date: NaiveDate) -> Result<i64, AppError> {
+    let midnight = date
+        .and_hms_opt(0, 0, 0)
+        .ok_or_else(|| AppError::Database("构造本地午夜时间失败".to_string()))?;
+    let datetime = Local
+        .from_local_datetime(&midnight)
+        .earliest()
+        .or_else(|| Local.from_local_datetime(&midnight).latest())
+        .ok_or_else(|| AppError::Database("解析本地午夜时间失败".to_string()))?;
+    Ok(datetime.timestamp())
+}
+
+fn current_local_day_range() -> Result<AggregationRange, AppError> {
+    let today = Local::now().date_naive();
+    let tomorrow = today
+        .succ_opt()
+        .ok_or_else(|| AppError::Database("计算明日日期失败".to_string()))?;
+
+    Ok(AggregationRange {
+        start_ts: local_midnight_timestamp(today)?,
+        end_ts: local_midnight_timestamp(tomorrow)?,
+        start_date: today.format("%Y-%m-%d").to_string(),
+        end_date_exclusive: tomorrow.format("%Y-%m-%d").to_string(),
+    })
+}
+
+fn current_local_month_range() -> Result<AggregationRange, AppError> {
+    let now = Local::now().date_naive();
+    let month_start = NaiveDate::from_ymd_opt(now.year(), now.month(), 1)
+        .ok_or_else(|| AppError::Database("计算本月起始日期失败".to_string()))?;
+    let next_month_start = if now.month() == 12 {
+        NaiveDate::from_ymd_opt(now.year() + 1, 1, 1)
+    } else {
+        NaiveDate::from_ymd_opt(now.year(), now.month() + 1, 1)
+    }
+    .ok_or_else(|| AppError::Database("计算下月起始日期失败".to_string()))?;
+
+    Ok(AggregationRange {
+        start_ts: local_midnight_timestamp(month_start)?,
+        end_ts: local_midnight_timestamp(next_month_start)?,
+        start_date: month_start.format("%Y-%m-%d").to_string(),
+        end_date_exclusive: next_month_start.format("%Y-%m-%d").to_string(),
+    })
 }
 
 impl Database {
@@ -248,6 +309,24 @@ impl Database {
         })?;
 
         Ok(result)
+    }
+
+    /// 获取当前应用下各 Provider 的今日成本（仅真实 Provider）
+    pub fn get_provider_today_costs(
+        &self,
+        app_type: &str,
+    ) -> Result<Vec<ProviderTodayCost>, AppError> {
+        let conn = lock_conn!(self.conn);
+        let range = current_local_day_range()?;
+        Ok(
+            Self::get_provider_costs_by_range(&conn, app_type, &range, None, true)?
+                .into_iter()
+                .map(|(provider_id, total_cost)| ProviderTodayCost {
+                    provider_id,
+                    total_cost: format!("{total_cost:.6}"),
+                })
+                .collect(),
+        )
     }
 
     /// 获取每日趋势（滑动窗口，<=24h 按小时，>24h 按天，窗口与汇总一致）
@@ -841,43 +920,28 @@ impl Database {
             })
             .unwrap_or((None, None));
 
-        // 计算今日使用量 (detail logs + rollup)
-        let daily_usage: f64 = conn
-            .query_row(
-                "SELECT COALESCE(SUM(cost), 0) FROM (
-                    SELECT CAST(total_cost_usd AS REAL) as cost
-                    FROM proxy_request_logs
-                    WHERE provider_id = ? AND app_type = ?
-                      AND date(datetime(created_at, 'unixepoch', 'localtime')) = date('now', 'localtime')
-                    UNION ALL
-                    SELECT CAST(total_cost_usd AS REAL)
-                    FROM usage_daily_rollups
-                    WHERE provider_id = ? AND app_type = ?
-                      AND date = date('now', 'localtime')
-                )",
-                params![provider_id, app_type, provider_id, app_type],
-                |row| row.get(0),
-            )
-            .unwrap_or(0.0);
+        let daily_range = current_local_day_range()?;
+        let monthly_range = current_local_month_range()?;
 
-        // 计算本月使用量 (detail logs + rollup)
-        let monthly_usage: f64 = conn
-            .query_row(
-                "SELECT COALESCE(SUM(cost), 0) FROM (
-                    SELECT CAST(total_cost_usd AS REAL) as cost
-                    FROM proxy_request_logs
-                    WHERE provider_id = ? AND app_type = ?
-                      AND strftime('%Y-%m', datetime(created_at, 'unixepoch', 'localtime')) = strftime('%Y-%m', 'now', 'localtime')
-                    UNION ALL
-                    SELECT CAST(total_cost_usd AS REAL)
-                    FROM usage_daily_rollups
-                    WHERE provider_id = ? AND app_type = ?
-                      AND strftime('%Y-%m', date) = strftime('%Y-%m', 'now', 'localtime')
-                )",
-                params![provider_id, app_type, provider_id, app_type],
-                |row| row.get(0),
-            )
-            .unwrap_or(0.0);
+        let daily_usage = Self::get_provider_costs_by_range(
+            &conn,
+            app_type,
+            &daily_range,
+            Some(provider_id),
+            false,
+        )?
+        .remove(provider_id)
+        .unwrap_or(0.0);
+
+        let monthly_usage = Self::get_provider_costs_by_range(
+            &conn,
+            app_type,
+            &monthly_range,
+            Some(provider_id),
+            false,
+        )?
+        .remove(provider_id)
+        .unwrap_or(0.0);
 
         let daily_exceeded = limit_daily
             .map(|limit| daily_usage >= limit)
@@ -895,6 +959,96 @@ impl Database {
             monthly_limit: limit_monthly.map(|l| format!("{l:.2}")),
             monthly_exceeded,
         })
+    }
+
+    fn get_provider_costs_by_range(
+        conn: &Connection,
+        app_type: &str,
+        range: &AggregationRange,
+        provider_id: Option<&str>,
+        require_registered_provider: bool,
+    ) -> Result<HashMap<String, f64>, AppError> {
+        let detail_join = if require_registered_provider {
+            "INNER JOIN providers p ON l.provider_id = p.id AND l.app_type = p.app_type"
+        } else {
+            ""
+        };
+        let rollup_join = if require_registered_provider {
+            "INNER JOIN providers p2 ON r.provider_id = p2.id AND r.app_type = p2.app_type"
+        } else {
+            ""
+        };
+
+        let mut detail_conditions = vec![
+            "l.app_type = ?".to_string(),
+            "l.created_at >= ?".to_string(),
+            "l.created_at < ?".to_string(),
+        ];
+        let mut detail_params: Vec<Box<dyn rusqlite::ToSql>> = vec![
+            Box::new(app_type.to_string()),
+            Box::new(range.start_ts),
+            Box::new(range.end_ts),
+        ];
+        if let Some(provider_id) = provider_id {
+            detail_conditions.push("l.provider_id = ?".to_string());
+            detail_params.push(Box::new(provider_id.to_string()));
+        }
+
+        let mut rollup_conditions = vec![
+            "r.app_type = ?".to_string(),
+            "r.date >= ?".to_string(),
+            "r.date < ?".to_string(),
+        ];
+        let mut rollup_params: Vec<Box<dyn rusqlite::ToSql>> = vec![
+            Box::new(app_type.to_string()),
+            Box::new(range.start_date.clone()),
+            Box::new(range.end_date_exclusive.clone()),
+        ];
+        if let Some(provider_id) = provider_id {
+            rollup_conditions.push("r.provider_id = ?".to_string());
+            rollup_params.push(Box::new(provider_id.to_string()));
+        }
+
+        let sql = format!(
+            "SELECT provider_id, COALESCE(SUM(cost), 0) as total_cost
+             FROM (
+                 SELECT l.provider_id as provider_id,
+                        COALESCE(SUM(CAST(l.total_cost_usd AS REAL)), 0) as cost
+                 FROM proxy_request_logs l
+                 {detail_join}
+                 WHERE {}
+                 GROUP BY l.provider_id
+
+                 UNION ALL
+
+                 SELECT r.provider_id as provider_id,
+                        COALESCE(SUM(CAST(r.total_cost_usd AS REAL)), 0) as cost
+                 FROM usage_daily_rollups r
+                 {rollup_join}
+                 WHERE {}
+                 GROUP BY r.provider_id
+             ) combined
+             GROUP BY provider_id",
+            detail_conditions.join(" AND "),
+            rollup_conditions.join(" AND "),
+        );
+
+        let mut params_vec = detail_params;
+        params_vec.extend(rollup_params);
+        let param_refs: Vec<&dyn rusqlite::ToSql> = params_vec.iter().map(|p| p.as_ref()).collect();
+
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(param_refs.as_slice(), |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?))
+        })?;
+
+        let mut result = HashMap::new();
+        for row in rows {
+            let (provider_id, total_cost) = row?;
+            result.insert(provider_id, total_cost);
+        }
+
+        Ok(result)
     }
 }
 
@@ -1108,6 +1262,19 @@ pub(crate) fn find_model_pricing_row(
 mod tests {
     use super::*;
 
+    fn insert_test_provider(
+        conn: &Connection,
+        provider_id: &str,
+        app_type: &str,
+    ) -> Result<(), AppError> {
+        conn.execute(
+            "INSERT INTO providers (id, app_type, name, settings_config, meta)
+             VALUES (?1, ?2, ?3, '{}', '{}')",
+            params![provider_id, app_type, format!("Provider {provider_id}")],
+        )?;
+        Ok(())
+    }
+
     #[test]
     fn test_get_usage_summary() -> Result<(), AppError> {
         let db = Database::memory()?;
@@ -1226,6 +1393,77 @@ mod tests {
         // 测试不存在的模型
         let result = find_model_pricing_row(&conn, "unknown-model-123")?;
         assert!(result.is_none(), "不应该匹配不存在的模型");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_get_provider_today_costs_filters_placeholder_provider_ids() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        let range = current_local_day_range()?;
+        let conn = lock_conn!(db.conn);
+
+        insert_test_provider(&conn, "p1", "claude")?;
+
+        conn.execute(
+            "INSERT INTO proxy_request_logs (
+                request_id, provider_id, app_type, model,
+                input_tokens, output_tokens, total_cost_usd,
+                latency_ms, status_code, created_at
+            ) VALUES (?1, 'p1', 'claude', 'claude-3', 100, 50, '0.25', 100, 200, ?2)",
+            params!["req-provider", range.start_ts + 60],
+        )?;
+        conn.execute(
+            "INSERT INTO proxy_request_logs (
+                request_id, provider_id, app_type, model,
+                input_tokens, output_tokens, total_cost_usd,
+                latency_ms, status_code, created_at
+            ) VALUES (?1, '_session', 'claude', 'claude-3', 100, 50, '9.99', 100, 200, ?2)",
+            params!["req-session", range.start_ts + 120],
+        )?;
+
+        drop(conn);
+
+        let costs = db.get_provider_today_costs("claude")?;
+        assert_eq!(costs.len(), 1);
+        assert_eq!(costs[0].provider_id, "p1");
+        assert_eq!(costs[0].total_cost, "0.250000");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_get_provider_today_costs_merges_detail_and_rollup() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        let range = current_local_day_range()?;
+        let conn = lock_conn!(db.conn);
+
+        insert_test_provider(&conn, "p1", "codex")?;
+
+        conn.execute(
+            "INSERT INTO proxy_request_logs (
+                request_id, provider_id, app_type, model,
+                input_tokens, output_tokens, total_cost_usd,
+                latency_ms, status_code, created_at
+            ) VALUES (?1, 'p1', 'codex', 'gpt-5', 120, 60, '0.30', 100, 200, ?2)",
+            params!["req-detail", range.start_ts + 60],
+        )?;
+        conn.execute(
+            "INSERT INTO usage_daily_rollups (
+                date, app_type, provider_id, model,
+                request_count, success_count,
+                input_tokens, output_tokens,
+                cache_read_tokens, cache_creation_tokens,
+                total_cost_usd, avg_latency_ms
+            ) VALUES (?1, 'codex', 'p1', 'gpt-5', 2, 2, 200, 100, 0, 0, '0.45', 120)",
+            params![range.start_date],
+        )?;
+
+        drop(conn);
+
+        let costs = db.get_provider_today_costs("codex")?;
+        assert_eq!(costs.len(), 1);
+        assert_eq!(costs[0].total_cost, "0.750000");
 
         Ok(())
     }

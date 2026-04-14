@@ -40,6 +40,15 @@ pub fn get_provider_stats(
     state.db.get_provider_stats(app_type.as_deref())
 }
 
+/// 获取当前应用下各 Provider 的今日成本
+#[tauri::command]
+pub fn get_provider_today_costs(
+    state: State<'_, AppState>,
+    app_type: String,
+) -> Result<Vec<ProviderTodayCost>, AppError> {
+    state.db.get_provider_today_costs(&app_type)
+}
+
 /// 获取模型统计
 #[tauri::command]
 pub fn get_model_stats(

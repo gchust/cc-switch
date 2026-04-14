@@ -140,6 +140,8 @@
     "sortUpdateFailed": "Failed to update sort order",
     "configureUsage": "Configure usage query",
     "officialPartner": "Official Partner",
+    "todayCost": "Today Cost",
+    "todayCostTooltip": "Based on local time from 00:00 today until now, and only includes requests attributable to this provider; -- means the current traffic cannot be attributed here, not that the actual cost is 0, and session imports or direct official traffic may also be excluded.",
     "openTerminal": "Open Terminal",
     "terminalOpened": "Terminal opened",
     "terminalOpenFailed": "Failed to open terminal",

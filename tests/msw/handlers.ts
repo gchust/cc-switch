@@ -80,6 +80,8 @@ export const handlers = [
     success({ primary: null, fallback: [] }),
   ),
 
+  http.post(`${TAURI_ENDPOINT}/get_provider_today_costs`, () => success([])),
+
   http.post(`${TAURI_ENDPOINT}/scan_openclaw_config_health`, () => success([])),
 
   http.post(`${TAURI_ENDPOINT}/switch_provider`, async ({ request }) => {

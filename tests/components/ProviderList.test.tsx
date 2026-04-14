@@ -8,9 +8,15 @@ import { ProviderList } from "@/components/providers/ProviderList";
 const useDragSortMock = vi.fn();
 const useSortableMock = vi.fn();
 const providerCardRenderSpy = vi.fn();
+const useProviderTodayCostsMock = vi.fn();
 
 vi.mock("@/hooks/useDragSort", () => ({
   useDragSort: (...args: unknown[]) => useDragSortMock(...args),
+}));
+
+vi.mock("@/lib/query/usage", () => ({
+  useProviderTodayCosts: (...args: unknown[]) =>
+    useProviderTodayCostsMock(...args),
 }));
 
 vi.mock("@/components/providers/ProviderCard", () => ({
@@ -124,6 +130,7 @@ beforeEach(() => {
   useDragSortMock.mockReset();
   useSortableMock.mockReset();
   providerCardRenderSpy.mockClear();
+  useProviderTodayCostsMock.mockReset();
 
   useSortableMock.mockImplementation(({ id }: { id: string }) => ({
     setNodeRef: vi.fn(),
@@ -138,6 +145,11 @@ beforeEach(() => {
     sortedProviders: [],
     sensors: [],
     handleDragEnd: vi.fn(),
+  });
+  useProviderTodayCostsMock.mockReturnValue({
+    data: [],
+    isLoading: false,
+    isError: false,
   });
 });
 
@@ -231,6 +243,10 @@ describe("ProviderList Component", () => {
 
     // Verify current provider marker
     expect(providerCardRenderSpy.mock.calls[0][0].isCurrent).toBe(true);
+    expect(providerCardRenderSpy.mock.calls[0][0].showTodayCost).toBe(true);
+    expect(providerCardRenderSpy.mock.calls[0][0].todayCost).toBeUndefined();
+    expect(providerCardRenderSpy.mock.calls[1][0].showTodayCost).toBe(true);
+    expect(providerCardRenderSpy.mock.calls[1][0].todayCost).toBeUndefined();
 
     // Drag attributes from useSortable
     expect(
@@ -262,6 +278,130 @@ describe("ProviderList Component", () => {
       { a: providerA, b: providerB },
       "claude",
     );
+  });
+
+  it("passes provider today cost to cards for supported apps", () => {
+    const providerA = createProvider({ id: "a", name: "A" });
+    const providerB = createProvider({ id: "b", name: "B" });
+
+    useDragSortMock.mockReturnValue({
+      sortedProviders: [providerA, providerB],
+      sensors: [],
+      handleDragEnd: vi.fn(),
+    });
+    useProviderTodayCostsMock.mockReturnValue({
+      data: [{ providerId: "b", totalCost: "1.230000" }],
+      isLoading: false,
+      isError: false,
+    });
+
+    renderWithQueryClient(
+      <ProviderList
+        providers={{ a: providerA, b: providerB }}
+        currentProviderId=""
+        appId="codex"
+        onSwitch={vi.fn()}
+        onEdit={vi.fn()}
+        onDelete={vi.fn()}
+        onDuplicate={vi.fn()}
+        onOpenWebsite={vi.fn()}
+      />,
+    );
+
+    expect(providerCardRenderSpy.mock.calls[0][0].showTodayCost).toBe(true);
+    expect(providerCardRenderSpy.mock.calls[0][0].todayCost).toBeUndefined();
+    expect(providerCardRenderSpy.mock.calls[1][0].showTodayCost).toBe(true);
+    expect(providerCardRenderSpy.mock.calls[1][0].todayCost).toBe("1.230000");
+    expect(useProviderTodayCostsMock).toHaveBeenCalledWith("codex", {
+      enabled: true,
+      refetchInterval: false,
+      refetchIntervalInBackground: true,
+    });
+  });
+
+  it("does not pass today cost to unsupported apps", () => {
+    const provider = createProvider({ id: "openclaw-provider" });
+    useDragSortMock.mockReturnValue({
+      sortedProviders: [provider],
+      sensors: [],
+      handleDragEnd: vi.fn(),
+    });
+
+    renderWithQueryClient(
+      <ProviderList
+        providers={{ [provider.id]: provider }}
+        currentProviderId=""
+        appId="openclaw"
+        onSwitch={vi.fn()}
+        onEdit={vi.fn()}
+        onDelete={vi.fn()}
+        onDuplicate={vi.fn()}
+        onOpenWebsite={vi.fn()}
+      />,
+    );
+
+    expect(providerCardRenderSpy.mock.calls[0][0].showTodayCost).toBe(false);
+    expect(providerCardRenderSpy.mock.calls[0][0].todayCost).toBeUndefined();
+  });
+
+  it("does not pass today cost while provider today costs are loading", () => {
+    const provider = createProvider({ id: "provider-loading" });
+    useDragSortMock.mockReturnValue({
+      sortedProviders: [provider],
+      sensors: [],
+      handleDragEnd: vi.fn(),
+    });
+    useProviderTodayCostsMock.mockReturnValue({
+      data: undefined,
+      isLoading: true,
+      isError: false,
+    });
+
+    renderWithQueryClient(
+      <ProviderList
+        providers={{ [provider.id]: provider }}
+        currentProviderId=""
+        appId="claude"
+        onSwitch={vi.fn()}
+        onEdit={vi.fn()}
+        onDelete={vi.fn()}
+        onDuplicate={vi.fn()}
+        onOpenWebsite={vi.fn()}
+      />,
+    );
+
+    expect(providerCardRenderSpy.mock.calls[0][0].showTodayCost).toBe(false);
+    expect(providerCardRenderSpy.mock.calls[0][0].todayCost).toBeUndefined();
+  });
+
+  it("does not pass today cost when provider today costs query errors", () => {
+    const provider = createProvider({ id: "provider-error" });
+    useDragSortMock.mockReturnValue({
+      sortedProviders: [provider],
+      sensors: [],
+      handleDragEnd: vi.fn(),
+    });
+    useProviderTodayCostsMock.mockReturnValue({
+      data: undefined,
+      isLoading: false,
+      isError: true,
+    });
+
+    renderWithQueryClient(
+      <ProviderList
+        providers={{ [provider.id]: provider }}
+        currentProviderId=""
+        appId="claude"
+        onSwitch={vi.fn()}
+        onEdit={vi.fn()}
+        onDelete={vi.fn()}
+        onDuplicate={vi.fn()}
+        onOpenWebsite={vi.fn()}
+      />,
+    );
+
+    expect(providerCardRenderSpy.mock.calls[0][0].showTodayCost).toBe(false);
+    expect(providerCardRenderSpy.mock.calls[0][0].todayCost).toBeUndefined();
   });
 
   it("filters providers with the search input", () => {
