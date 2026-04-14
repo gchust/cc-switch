@@ -34,6 +34,7 @@ import {
   useAddToFailoverQueue,
   useRemoveFromFailoverQueue,
 } from "@/lib/query/failover";
+import { useProviderTodayCosts } from "@/lib/query/usage";
 import {
   useCurrentOmoProviderId,
   useCurrentOmoSlimProviderId,
@@ -93,6 +94,8 @@ export function ProviderList({
     providers,
     appId,
   );
+  const supportsTodayCost =
+    appId === "claude" || appId === "codex" || appId === "gemini";
 
   const { data: opencodeLiveIds } = useQuery({
     queryKey: ["opencodeLiveProviderIds"],
@@ -123,6 +126,35 @@ export function ProviderList({
   const { data: openclawDefaultModel } = useOpenClawDefaultModel(
     appId === "openclaw",
   );
+
+  const {
+    data: providerTodayCosts,
+    isLoading: isProviderTodayCostsLoading,
+    isError: isProviderTodayCostsError,
+  } = useProviderTodayCosts(
+    supportsTodayCost ? appId : undefined,
+    {
+      enabled: supportsTodayCost,
+      refetchInterval: isProxyRunning ? 30000 : false,
+      refetchIntervalInBackground: true,
+    },
+  );
+
+  const providerTodayCostMap = useMemo(
+    () =>
+      new Map(
+        (providerTodayCosts ?? []).map((item) => [
+          item.providerId,
+          item.totalCost,
+        ]),
+      ),
+    [providerTodayCosts],
+  );
+  const shouldShowProviderTodayCosts =
+    supportsTodayCost &&
+    providerTodayCosts !== undefined &&
+    !isProviderTodayCostsLoading &&
+    !isProviderTodayCostsError;
 
   const isProviderDefaultModel = useCallback(
     (providerId: string): boolean => {
@@ -359,6 +391,11 @@ export function ProviderList({
                   handleToggleFailover(provider.id, enabled)
                 }
                 activeProviderId={activeProviderId}
+                todayCost={
+                  shouldShowProviderTodayCosts
+                    ? (providerTodayCostMap.get(provider.id) ?? "0.000000")
+                    : undefined
+                }
                 // OpenClaw: default model
                 isDefaultModel={isProviderDefaultModel(provider.id)}
                 onSetAsDefault={
@@ -490,6 +527,7 @@ interface SortableProviderCardProps {
   isInFailoverQueue: boolean;
   onToggleFailover: (enabled: boolean) => void;
   activeProviderId?: string;
+  todayCost?: string;
   // OpenClaw: default model
   isDefaultModel?: boolean;
   onSetAsDefault?: () => void;
@@ -521,6 +559,7 @@ function SortableProviderCard({
   isInFailoverQueue,
   onToggleFailover,
   activeProviderId,
+  todayCost,
   isDefaultModel,
   onSetAsDefault,
 }: SortableProviderCardProps) {
@@ -573,6 +612,7 @@ function SortableProviderCard({
         isInFailoverQueue={isInFailoverQueue}
         onToggleFailover={onToggleFailover}
         activeProviderId={activeProviderId}
+        todayCost={todayCost}
         // OpenClaw: default model
         isDefaultModel={isDefaultModel}
         onSetAsDefault={onSetAsDefault}

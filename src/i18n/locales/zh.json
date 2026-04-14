@@ -140,6 +140,8 @@
     "sortUpdateFailed": "排序更新失败",
     "configureUsage": "配置用量查询",
     "officialPartner": "官方合作伙伴",
+    "todayCost": "今日成本",
+    "todayCostTooltip": "按本地时区统计今天 00:00 至今，仅包含可归因到当前 Provider 的请求；不等于余额或套餐，也可能不覆盖会话导入、官方直连等场景。",
     "openTerminal": "打开终端",
     "terminalOpened": "终端已打开",
     "terminalOpenFailed": "打开终端失败",

@@ -1,6 +1,7 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { usageApi } from "@/lib/api/usage";
 import type { LogFilters } from "@/types/usage";
+import type { AppId } from "@/lib/api/types";
 
 const DEFAULT_REFETCH_INTERVAL_MS = 30000;
 
@@ -40,6 +41,8 @@ export const usageKeys = {
     [...usageKeys.all, "trends", days, appType ?? "all"] as const,
   providerStats: (appType?: string) =>
     [...usageKeys.all, "provider-stats", appType ?? "all"] as const,
+  providerTodayCosts: (appType: AppId) =>
+    [...usageKeys.all, "provider-today-costs", appType] as const,
   modelStats: (appType?: string) =>
     [...usageKeys.all, "model-stats", appType ?? "all"] as const,
   logs: (key: RequestLogsKey, page: number, pageSize: number) =>
@@ -114,6 +117,21 @@ export function useProviderStats(
     queryKey: usageKeys.providerStats(appType),
     queryFn: () => usageApi.getProviderStats(effectiveAppType),
     refetchInterval: options?.refetchInterval ?? DEFAULT_REFETCH_INTERVAL_MS,
+    refetchIntervalInBackground: options?.refetchIntervalInBackground ?? false,
+  });
+}
+
+export function useProviderTodayCosts(
+  appType?: AppId,
+  options?: UsageQueryOptions & { enabled?: boolean },
+) {
+  return useQuery({
+    queryKey: appType
+      ? usageKeys.providerTodayCosts(appType)
+      : [...usageKeys.all, "provider-today-costs", "disabled"],
+    queryFn: () => usageApi.getProviderTodayCosts(appType!),
+    enabled: (options?.enabled ?? true) && !!appType,
+    refetchInterval: options?.refetchInterval ?? false,
     refetchIntervalInBackground: options?.refetchIntervalInBackground ?? false,
   });
 }

@@ -1,5 +1,5 @@
 import { useMemo, useState, useEffect } from "react";
-import { GripVertical, ChevronDown, ChevronUp } from "lucide-react";
+import { GripVertical, ChevronDown, ChevronUp, Info } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import type {
   DraggableAttributes,
@@ -20,6 +20,13 @@ import { FailoverPriorityBadge } from "@/components/providers/FailoverPriorityBa
 import { extractCodexBaseUrl } from "@/utils/providerConfigUtils";
 import { useProviderHealth } from "@/lib/query/failover";
 import { useUsageQuery } from "@/lib/query/queries";
+import { fmtUsd, parseFiniteNumber } from "@/components/usage/format";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 
 interface DragHandleProps {
   attributes: DraggableAttributes;
@@ -54,6 +61,7 @@ interface ProviderCardProps {
   isInFailoverQueue?: boolean; // 是否在故障转移队列中
   onToggleFailover?: (enabled: boolean) => void; // 切换故障转移队列
   activeProviderId?: string; // 代理当前实际使用的供应商 ID（用于故障转移模式下标注绿色边框）
+  todayCost?: string;
   // OpenClaw: default model
   isDefaultModel?: boolean;
   onSetAsDefault?: () => void;
@@ -142,6 +150,7 @@ export function ProviderCard({
   isInFailoverQueue = false,
   onToggleFailover,
   activeProviderId,
+  todayCost,
   // OpenClaw: default model
   isDefaultModel,
   onSetAsDefault,
@@ -237,6 +246,15 @@ export function ProviderCard({
     (!isAnyOmo &&
       !isProxyTakeover &&
       (isActiveProvider || hasPersistentConfigHighlight));
+  const shouldShowTodayCost = typeof todayCost === "string";
+  const todayCostValue = parseFiniteNumber(todayCost);
+  const isTodayCostZero = !todayCostValue;
+  const todayCostDisplay =
+    todayCostValue && todayCostValue > 0 ? fmtUsd(todayCostValue, 4) : "$0.00";
+  const todayCostTooltip = t("provider.todayCostTooltip", {
+    defaultValue:
+      "按本地时区统计今天 00:00 至今，仅包含可归因到当前 Provider 的请求；不等于余额或套餐，也可能不覆盖会话导入、官方直连等场景。",
+  });
 
   return (
     <div
@@ -291,7 +309,7 @@ export function ProviderCard({
             />
           </div>
 
-          <div className="space-y-1">
+          <div className="min-w-0 flex-1 space-y-1">
             <div className="flex flex-wrap items-center gap-2 min-h-7">
               <h3 className="text-base font-semibold leading-none">
                 {provider.name}
@@ -334,21 +352,60 @@ export function ProviderCard({
                 )}
             </div>
 
-            {displayUrl && (
-              <button
-                type="button"
-                onClick={handleOpenWebsite}
-                className={cn(
-                  "inline-flex items-center text-sm max-w-[280px]",
-                  isClickableUrl
-                    ? "text-blue-500 transition-colors hover:underline dark:text-blue-400 cursor-pointer"
-                    : "text-muted-foreground cursor-default",
+            {(displayUrl || shouldShowTodayCost) && (
+              <div className="flex flex-col gap-1 text-sm sm:grid sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center sm:gap-x-3">
+                {displayUrl ? (
+                  <button
+                    type="button"
+                    onClick={handleOpenWebsite}
+                    className={cn(
+                      "inline-flex min-w-0 items-center text-sm",
+                      isClickableUrl
+                        ? "text-blue-500 transition-colors hover:underline dark:text-blue-400 cursor-pointer"
+                        : "text-muted-foreground cursor-default",
+                    )}
+                    title={displayUrl}
+                    disabled={!isClickableUrl}
+                  >
+                    <span className="truncate">{displayUrl}</span>
+                  </button>
+                ) : (
+                  <span />
                 )}
-                title={displayUrl}
-                disabled={!isClickableUrl}
-              >
-                <span className="truncate">{displayUrl}</span>
-              </button>
+
+                {shouldShowTodayCost && (
+                  <TooltipProvider delayDuration={200}>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <button
+                          type="button"
+                          className="inline-flex items-center gap-1 self-start rounded-sm border-0 bg-transparent p-0 text-left text-xs text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 sm:justify-self-end"
+                        >
+                          <span>
+                            {t("provider.todayCost", {
+                              defaultValue: "今日成本",
+                            })}
+                          </span>
+                          <span
+                            className={cn(
+                              "font-semibold tabular-nums",
+                              isTodayCostZero
+                                ? "text-muted-foreground"
+                                : "text-foreground",
+                            )}
+                          >
+                            {todayCostDisplay}
+                          </span>
+                          <Info className="h-3 w-3 opacity-70" />
+                        </button>
+                      </TooltipTrigger>
+                      <TooltipContent className="max-w-xs whitespace-normal">
+                        {todayCostTooltip}
+                      </TooltipContent>
+                    </Tooltip>
+                  </TooltipProvider>
+                )}
+              </div>
             )}
           </div>
         </div>
