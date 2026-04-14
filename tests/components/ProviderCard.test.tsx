@@ -54,10 +54,16 @@ function createProvider(overrides: Partial<Provider> = {}): Provider {
   };
 }
 
-function renderCard(todayCost?: string, provider?: Provider) {
+function renderCard(
+  options: {
+    showTodayCost?: boolean;
+    todayCost?: string;
+    provider?: Provider;
+  } = {},
+) {
   return render(
     <ProviderCard
-      provider={provider ?? createProvider()}
+      provider={options.provider ?? createProvider()}
       isCurrent={false}
       appId="claude"
       onSwitch={vi.fn()}
@@ -67,14 +73,15 @@ function renderCard(todayCost?: string, provider?: Provider) {
       onOpenWebsite={vi.fn()}
       onDuplicate={vi.fn()}
       isProxyRunning={false}
-      todayCost={todayCost}
+      showTodayCost={options.showTodayCost}
+      todayCost={options.todayCost}
     />,
   );
 }
 
 describe("ProviderCard", () => {
   it("renders today cost and tooltip for supported providers", async () => {
-    renderCard("1.230000");
+    renderCard({ showTodayCost: true, todayCost: "1.230000" });
 
     expect(screen.getByText("今日成本")).toBeInTheDocument();
     expect(screen.getByText("$1.2300")).toBeInTheDocument();
@@ -83,18 +90,31 @@ describe("ProviderCard", () => {
     fireEvent.focus(todayCostButton);
 
     expect(await screen.findByRole("tooltip")).toHaveTextContent(
-      "按本地时区统计今天 00:00 至今，仅包含可归因到当前 Provider 的请求；不等于余额或套餐，也可能不覆盖会话导入、官方直连等场景。",
+      "按本地时区统计今天 00:00 至今，仅包含可归因到当前 Provider 的请求；显示 -- 表示当前无法归因，不代表实际成本为 0，也可能不覆盖会话导入、官方直连等场景。",
     );
   });
 
   it("renders zero cost as $0.00", () => {
-    renderCard("0.000000");
+    renderCard({ showTodayCost: true, todayCost: "0.000000" });
 
     expect(screen.getByText("$0.00")).toBeInTheDocument();
   });
 
-  it("does not render today cost block when prop is missing", () => {
-    renderCard(undefined, createProvider({ notes: "旧账号" }));
+  it("renders missing today cost as --", () => {
+    renderCard({
+      showTodayCost: true,
+      provider: createProvider({ notes: "旧账号" }),
+    });
+
+    expect(screen.getByText("今日成本")).toBeInTheDocument();
+    expect(screen.getByText("--")).toBeInTheDocument();
+  });
+
+  it("does not render today cost block when disabled", () => {
+    renderCard({
+      showTodayCost: false,
+      provider: createProvider({ notes: "旧账号" }),
+    });
 
     expect(screen.queryByText("今日成本")).not.toBeInTheDocument();
   });

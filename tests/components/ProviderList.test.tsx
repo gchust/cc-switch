@@ -243,8 +243,10 @@ describe("ProviderList Component", () => {
 
     // Verify current provider marker
     expect(providerCardRenderSpy.mock.calls[0][0].isCurrent).toBe(true);
-    expect(providerCardRenderSpy.mock.calls[0][0].todayCost).toBe("0.000000");
-    expect(providerCardRenderSpy.mock.calls[1][0].todayCost).toBe("0.000000");
+    expect(providerCardRenderSpy.mock.calls[0][0].showTodayCost).toBe(true);
+    expect(providerCardRenderSpy.mock.calls[0][0].todayCost).toBeUndefined();
+    expect(providerCardRenderSpy.mock.calls[1][0].showTodayCost).toBe(true);
+    expect(providerCardRenderSpy.mock.calls[1][0].todayCost).toBeUndefined();
 
     // Drag attributes from useSortable
     expect(
@@ -306,7 +308,9 @@ describe("ProviderList Component", () => {
       />,
     );
 
-    expect(providerCardRenderSpy.mock.calls[0][0].todayCost).toBe("0.000000");
+    expect(providerCardRenderSpy.mock.calls[0][0].showTodayCost).toBe(true);
+    expect(providerCardRenderSpy.mock.calls[0][0].todayCost).toBeUndefined();
+    expect(providerCardRenderSpy.mock.calls[1][0].showTodayCost).toBe(true);
     expect(providerCardRenderSpy.mock.calls[1][0].todayCost).toBe("1.230000");
     expect(useProviderTodayCostsMock).toHaveBeenCalledWith("codex", {
       enabled: true,
@@ -336,6 +340,7 @@ describe("ProviderList Component", () => {
       />,
     );
 
+    expect(providerCardRenderSpy.mock.calls[0][0].showTodayCost).toBe(false);
     expect(providerCardRenderSpy.mock.calls[0][0].todayCost).toBeUndefined();
   });
 
@@ -365,6 +370,7 @@ describe("ProviderList Component", () => {
       />,
     );
 
+    expect(providerCardRenderSpy.mock.calls[0][0].showTodayCost).toBe(false);
     expect(providerCardRenderSpy.mock.calls[0][0].todayCost).toBeUndefined();
   });
 
@@ -394,6 +400,7 @@ describe("ProviderList Component", () => {
       />,
     );
 
+    expect(providerCardRenderSpy.mock.calls[0][0].showTodayCost).toBe(false);
     expect(providerCardRenderSpy.mock.calls[0][0].todayCost).toBeUndefined();
   });
 

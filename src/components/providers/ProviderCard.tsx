@@ -61,6 +61,7 @@ interface ProviderCardProps {
   isInFailoverQueue?: boolean; // 是否在故障转移队列中
   onToggleFailover?: (enabled: boolean) => void; // 切换故障转移队列
   activeProviderId?: string; // 代理当前实际使用的供应商 ID（用于故障转移模式下标注绿色边框）
+  showTodayCost?: boolean;
   todayCost?: string;
   // OpenClaw: default model
   isDefaultModel?: boolean;
@@ -150,6 +151,7 @@ export function ProviderCard({
   isInFailoverQueue = false,
   onToggleFailover,
   activeProviderId,
+  showTodayCost = false,
   todayCost,
   // OpenClaw: default model
   isDefaultModel,
@@ -246,14 +248,17 @@ export function ProviderCard({
     (!isAnyOmo &&
       !isProxyTakeover &&
       (isActiveProvider || hasPersistentConfigHighlight));
-  const shouldShowTodayCost = typeof todayCost === "string";
   const todayCostValue = parseFiniteNumber(todayCost);
-  const isTodayCostZero = !todayCostValue;
-  const todayCostDisplay =
-    todayCostValue && todayCostValue > 0 ? fmtUsd(todayCostValue, 4) : "$0.00";
+  const isTodayCostUnavailable = todayCostValue == null;
+  const isTodayCostZero = todayCostValue === 0;
+  const todayCostDisplay = isTodayCostUnavailable
+    ? "--"
+    : isTodayCostZero
+      ? "$0.00"
+      : fmtUsd(todayCostValue, 4);
   const todayCostTooltip = t("provider.todayCostTooltip", {
     defaultValue:
-      "按本地时区统计今天 00:00 至今，仅包含可归因到当前 Provider 的请求；不等于余额或套餐，也可能不覆盖会话导入、官方直连等场景。",
+      "按本地时区统计今天 00:00 至今，仅包含可归因到当前 Provider 的请求；显示 -- 表示当前无法归因，不代表实际成本为 0，也可能不覆盖会话导入、官方直连等场景。",
   });
 
   return (
@@ -352,7 +357,7 @@ export function ProviderCard({
                 )}
             </div>
 
-            {(displayUrl || shouldShowTodayCost) && (
+            {(displayUrl || showTodayCost) && (
               <div className="flex flex-col gap-1 text-sm sm:grid sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center sm:gap-x-3">
                 {displayUrl ? (
                   <button
@@ -373,7 +378,7 @@ export function ProviderCard({
                   <span />
                 )}
 
-                {shouldShowTodayCost && (
+                {showTodayCost && (
                   <TooltipProvider delayDuration={200}>
                     <Tooltip>
                       <TooltipTrigger asChild>
@@ -389,7 +394,7 @@ export function ProviderCard({
                           <span
                             className={cn(
                               "font-semibold tabular-nums",
-                              isTodayCostZero
+                              isTodayCostUnavailable || isTodayCostZero
                                 ? "text-muted-foreground"
                                 : "text-foreground",
                             )}

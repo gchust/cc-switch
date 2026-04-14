@@ -388,9 +388,10 @@ export function ProviderList({
                   handleToggleFailover(provider.id, enabled)
                 }
                 activeProviderId={activeProviderId}
+                showTodayCost={shouldShowProviderTodayCosts}
                 todayCost={
                   shouldShowProviderTodayCosts
-                    ? (providerTodayCostMap.get(provider.id) ?? "0.000000")
+                    ? providerTodayCostMap.get(provider.id)
                     : undefined
                 }
                 // OpenClaw: default model
@@ -524,6 +525,7 @@ interface SortableProviderCardProps {
   isInFailoverQueue: boolean;
   onToggleFailover: (enabled: boolean) => void;
   activeProviderId?: string;
+  showTodayCost?: boolean;
   todayCost?: string;
   // OpenClaw: default model
   isDefaultModel?: boolean;
@@ -556,6 +558,7 @@ function SortableProviderCard({
   isInFailoverQueue,
   onToggleFailover,
   activeProviderId,
+  showTodayCost,
   todayCost,
   isDefaultModel,
   onSetAsDefault,
@@ -609,6 +612,7 @@ function SortableProviderCard({
         isInFailoverQueue={isInFailoverQueue}
         onToggleFailover={onToggleFailover}
         activeProviderId={activeProviderId}
+        showTodayCost={showTodayCost}
         todayCost={todayCost}
         // OpenClaw: default model
         isDefaultModel={isDefaultModel}
