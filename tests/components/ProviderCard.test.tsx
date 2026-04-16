@@ -56,8 +56,12 @@ function createProvider(overrides: Partial<Provider> = {}): Provider {
 
 function renderCard(
   options: {
-    showTodayCost?: boolean;
-    todayCost?: string;
+    showTodayStats?: boolean;
+    todayStats?: {
+      totalCost: string;
+      requestCount: number;
+      totalTokens: number;
+    };
     provider?: Provider;
   } = {},
 ) {
@@ -73,49 +77,68 @@ function renderCard(
       onOpenWebsite={vi.fn()}
       onDuplicate={vi.fn()}
       isProxyRunning={false}
-      showTodayCost={options.showTodayCost}
-      todayCost={options.todayCost}
+      showTodayStats={options.showTodayStats}
+      todayStats={options.todayStats}
     />,
   );
 }
 
 describe("ProviderCard", () => {
-  it("renders today cost and tooltip for supported providers", async () => {
-    renderCard({ showTodayCost: true, todayCost: "1.230000" });
-
-    expect(screen.getByText("今日成本")).toBeInTheDocument();
-    expect(screen.getByText("$1.2300")).toBeInTheDocument();
-
-    const todayCostButton = screen.getByRole("button", { name: /今日成本/i });
-    fireEvent.focus(todayCostButton);
-
-    expect(await screen.findByRole("tooltip")).toHaveTextContent(
-      "按本地时区统计今天 00:00 至今，仅包含可归因到当前 Provider 的请求；显示 -- 表示当前无法归因，不代表实际成本为 0，也可能不覆盖会话导入、官方直连等场景。",
-    );
-  });
-
-  it("renders zero cost as $0.00", () => {
-    renderCard({ showTodayCost: true, todayCost: "0.000000" });
-
-    expect(screen.getByText("$0.00")).toBeInTheDocument();
-  });
-
-  it("renders missing today cost as --", () => {
+  it("renders today summary and tooltip for supported providers", async () => {
     renderCard({
-      showTodayCost: true,
+      showTodayStats: true,
+      todayStats: {
+        totalCost: "1.230000",
+        requestCount: 128,
+        totalTokens: 18388,
+      },
+    });
+
+    expect(screen.getByText("今日")).toBeInTheDocument();
+    expect(
+      screen.getByText("$1.2300 · 128 次 · 18.4k tok"),
+    ).toBeInTheDocument();
+
+    const todayStatsButton = screen.getByRole("button", { name: /今日/i });
+    fireEvent.focus(todayStatsButton);
+
+    expect(await screen.findByRole("tooltip")).toHaveTextContent("今日成本");
+    expect(screen.getByRole("tooltip")).toHaveTextContent("$1.2300");
+    expect(screen.getByRole("tooltip")).toHaveTextContent("今日请求");
+    expect(screen.getByRole("tooltip")).toHaveTextContent("128");
+    expect(screen.getByRole("tooltip")).toHaveTextContent("今日 Tokens");
+    expect(screen.getByRole("tooltip")).toHaveTextContent("18,388");
+  });
+
+  it("renders zero summary values as explicit zeros", () => {
+    renderCard({
+      showTodayStats: true,
+      todayStats: {
+        totalCost: "0.000000",
+        requestCount: 0,
+        totalTokens: 0,
+      },
+    });
+
+    expect(screen.getByText("$0.00 · 0 次 · 0 tok")).toBeInTheDocument();
+  });
+
+  it("renders missing today stats as -- placeholders", () => {
+    renderCard({
+      showTodayStats: true,
       provider: createProvider({ notes: "旧账号" }),
     });
 
-    expect(screen.getByText("今日成本")).toBeInTheDocument();
-    expect(screen.getByText("--")).toBeInTheDocument();
+    expect(screen.getByText("今日")).toBeInTheDocument();
+    expect(screen.getByText("-- · -- · --")).toBeInTheDocument();
   });
 
-  it("does not render today cost block when disabled", () => {
+  it("does not render today summary block when disabled", () => {
     renderCard({
-      showTodayCost: false,
+      showTodayStats: false,
       provider: createProvider({ notes: "旧账号" }),
     });
 
-    expect(screen.queryByText("今日成本")).not.toBeInTheDocument();
+    expect(screen.queryByText("今日")).not.toBeInTheDocument();
   });
 });

@@ -57,6 +57,8 @@ pub struct ProviderStats {
 pub struct ProviderTodayCost {
     pub provider_id: String,
     pub total_cost: String,
+    pub request_count: u64,
+    pub total_tokens: u64,
 }
 
 /// 模型统计
@@ -319,11 +321,13 @@ impl Database {
         let conn = lock_conn!(self.conn);
         let range = current_local_day_range()?;
         Ok(
-            Self::get_provider_costs_by_range(&conn, app_type, &range, None, true)?
+            Self::get_provider_usage_by_range(&conn, app_type, &range, None, true)?
                 .into_iter()
-                .map(|(provider_id, total_cost)| ProviderTodayCost {
+                .map(|(provider_id, usage)| ProviderTodayCost {
                     provider_id,
-                    total_cost: format!("{total_cost:.6}"),
+                    total_cost: format!("{:.6}", usage.total_cost),
+                    request_count: usage.request_count,
+                    total_tokens: usage.total_tokens,
                 })
                 .collect(),
         )
@@ -923,7 +927,7 @@ impl Database {
         let daily_range = current_local_day_range()?;
         let monthly_range = current_local_month_range()?;
 
-        let daily_usage = Self::get_provider_costs_by_range(
+        let daily_usage = Self::get_provider_usage_by_range(
             &conn,
             app_type,
             &daily_range,
@@ -931,9 +935,10 @@ impl Database {
             false,
         )?
         .remove(provider_id)
+        .map(|usage| usage.total_cost)
         .unwrap_or(0.0);
 
-        let monthly_usage = Self::get_provider_costs_by_range(
+        let monthly_usage = Self::get_provider_usage_by_range(
             &conn,
             app_type,
             &monthly_range,
@@ -941,6 +946,7 @@ impl Database {
             false,
         )?
         .remove(provider_id)
+        .map(|usage| usage.total_cost)
         .unwrap_or(0.0);
 
         let daily_exceeded = limit_daily
@@ -961,13 +967,13 @@ impl Database {
         })
     }
 
-    fn get_provider_costs_by_range(
+    fn get_provider_usage_by_range(
         conn: &Connection,
         app_type: &str,
         range: &AggregationRange,
         provider_id: Option<&str>,
         require_registered_provider: bool,
-    ) -> Result<HashMap<String, f64>, AppError> {
+    ) -> Result<HashMap<String, ProviderUsageAggregate>, AppError> {
         let detail_join = if require_registered_provider {
             "INNER JOIN providers p ON l.provider_id = p.id AND l.app_type = p.app_type"
         } else {
@@ -1010,10 +1016,17 @@ impl Database {
         }
 
         let sql = format!(
-            "SELECT provider_id, COALESCE(SUM(cost), 0) as total_cost
+            "SELECT
+                provider_id,
+                COALESCE(SUM(total_cost), 0) as total_cost,
+                COALESCE(SUM(request_count), 0) as request_count,
+                COALESCE(SUM(total_tokens), 0) as total_tokens
              FROM (
-                 SELECT l.provider_id as provider_id,
-                        COALESCE(SUM(CAST(l.total_cost_usd AS REAL)), 0) as cost
+                 SELECT
+                    l.provider_id as provider_id,
+                    COALESCE(SUM(CAST(l.total_cost_usd AS REAL)), 0) as total_cost,
+                    COUNT(*) as request_count,
+                    COALESCE(SUM(l.input_tokens + l.output_tokens), 0) as total_tokens
                  FROM proxy_request_logs l
                  {detail_join}
                  WHERE {}
@@ -1021,8 +1034,11 @@ impl Database {
 
                  UNION ALL
 
-                 SELECT r.provider_id as provider_id,
-                        COALESCE(SUM(CAST(r.total_cost_usd AS REAL)), 0) as cost
+                 SELECT
+                    r.provider_id as provider_id,
+                    COALESCE(SUM(CAST(r.total_cost_usd AS REAL)), 0) as total_cost,
+                    COALESCE(SUM(r.request_count), 0) as request_count,
+                    COALESCE(SUM(r.input_tokens + r.output_tokens), 0) as total_tokens
                  FROM usage_daily_rollups r
                  {rollup_join}
                  WHERE {}
@@ -1035,17 +1051,25 @@ impl Database {
 
         let mut params_vec = detail_params;
         params_vec.extend(rollup_params);
-        let param_refs: Vec<&dyn rusqlite::ToSql> = params_vec.iter().map(|p| p.as_ref()).collect();
+        let param_refs: Vec<&dyn rusqlite::ToSql> =
+            params_vec.iter().map(|p| p.as_ref()).collect();
 
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map(param_refs.as_slice(), |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?))
+            Ok((
+                row.get::<_, String>(0)?,
+                ProviderUsageAggregate {
+                    total_cost: row.get::<_, f64>(1)?,
+                    request_count: row.get::<_, i64>(2)? as u64,
+                    total_tokens: row.get::<_, i64>(3)? as u64,
+                },
+            ))
         })?;
 
         let mut result = HashMap::new();
         for row in rows {
-            let (provider_id, total_cost) = row?;
-            result.insert(provider_id, total_cost);
+            let (provider_id, usage) = row?;
+            result.insert(provider_id, usage);
         }
 
         Ok(result)
@@ -1071,6 +1095,13 @@ struct PricingInfo {
     output: rust_decimal::Decimal,
     cache_read: rust_decimal::Decimal,
     cache_creation: rust_decimal::Decimal,
+}
+
+#[derive(Debug, Clone, Default)]
+struct ProviderUsageAggregate {
+    total_cost: f64,
+    request_count: u64,
+    total_tokens: u64,
 }
 
 impl Database {
@@ -1428,6 +1459,8 @@ mod tests {
         assert_eq!(costs.len(), 1);
         assert_eq!(costs[0].provider_id, "p1");
         assert_eq!(costs[0].total_cost, "0.250000");
+        assert_eq!(costs[0].request_count, 1);
+        assert_eq!(costs[0].total_tokens, 150);
 
         Ok(())
     }
@@ -1464,6 +1497,8 @@ mod tests {
         let costs = db.get_provider_today_costs("codex")?;
         assert_eq!(costs.len(), 1);
         assert_eq!(costs[0].total_cost, "0.750000");
+        assert_eq!(costs[0].request_count, 3);
+        assert_eq!(costs[0].total_tokens, 480);
 
         Ok(())
     }

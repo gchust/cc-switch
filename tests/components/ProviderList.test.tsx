@@ -243,10 +243,10 @@ describe("ProviderList Component", () => {
 
     // Verify current provider marker
     expect(providerCardRenderSpy.mock.calls[0][0].isCurrent).toBe(true);
-    expect(providerCardRenderSpy.mock.calls[0][0].showTodayCost).toBe(true);
-    expect(providerCardRenderSpy.mock.calls[0][0].todayCost).toBeUndefined();
-    expect(providerCardRenderSpy.mock.calls[1][0].showTodayCost).toBe(true);
-    expect(providerCardRenderSpy.mock.calls[1][0].todayCost).toBeUndefined();
+    expect(providerCardRenderSpy.mock.calls[0][0].showTodayStats).toBe(true);
+    expect(providerCardRenderSpy.mock.calls[0][0].todayStats).toBeUndefined();
+    expect(providerCardRenderSpy.mock.calls[1][0].showTodayStats).toBe(true);
+    expect(providerCardRenderSpy.mock.calls[1][0].todayStats).toBeUndefined();
 
     // Drag attributes from useSortable
     expect(
@@ -280,7 +280,7 @@ describe("ProviderList Component", () => {
     );
   });
 
-  it("passes provider today cost to cards for supported apps", () => {
+  it("passes provider today stats to cards for supported apps", () => {
     const providerA = createProvider({ id: "a", name: "A" });
     const providerB = createProvider({ id: "b", name: "B" });
 
@@ -290,7 +290,14 @@ describe("ProviderList Component", () => {
       handleDragEnd: vi.fn(),
     });
     useProviderTodayCostsMock.mockReturnValue({
-      data: [{ providerId: "b", totalCost: "1.230000" }],
+      data: [
+        {
+          providerId: "b",
+          totalCost: "1.230000",
+          requestCount: 12,
+          totalTokens: 18388,
+        },
+      ],
       isLoading: false,
       isError: false,
     });
@@ -308,10 +315,15 @@ describe("ProviderList Component", () => {
       />,
     );
 
-    expect(providerCardRenderSpy.mock.calls[0][0].showTodayCost).toBe(true);
-    expect(providerCardRenderSpy.mock.calls[0][0].todayCost).toBeUndefined();
-    expect(providerCardRenderSpy.mock.calls[1][0].showTodayCost).toBe(true);
-    expect(providerCardRenderSpy.mock.calls[1][0].todayCost).toBe("1.230000");
+    expect(providerCardRenderSpy.mock.calls[0][0].showTodayStats).toBe(true);
+    expect(providerCardRenderSpy.mock.calls[0][0].todayStats).toBeUndefined();
+    expect(providerCardRenderSpy.mock.calls[1][0].showTodayStats).toBe(true);
+    expect(providerCardRenderSpy.mock.calls[1][0].todayStats).toEqual({
+      providerId: "b",
+      totalCost: "1.230000",
+      requestCount: 12,
+      totalTokens: 18388,
+    });
     expect(useProviderTodayCostsMock).toHaveBeenCalledWith("codex", {
       enabled: true,
       refetchInterval: false,
@@ -340,8 +352,8 @@ describe("ProviderList Component", () => {
       />,
     );
 
-    expect(providerCardRenderSpy.mock.calls[0][0].showTodayCost).toBe(false);
-    expect(providerCardRenderSpy.mock.calls[0][0].todayCost).toBeUndefined();
+    expect(providerCardRenderSpy.mock.calls[0][0].showTodayStats).toBe(false);
+    expect(providerCardRenderSpy.mock.calls[0][0].todayStats).toBeUndefined();
   });
 
   it("does not pass today cost while provider today costs are loading", () => {
@@ -370,8 +382,8 @@ describe("ProviderList Component", () => {
       />,
     );
 
-    expect(providerCardRenderSpy.mock.calls[0][0].showTodayCost).toBe(false);
-    expect(providerCardRenderSpy.mock.calls[0][0].todayCost).toBeUndefined();
+    expect(providerCardRenderSpy.mock.calls[0][0].showTodayStats).toBe(false);
+    expect(providerCardRenderSpy.mock.calls[0][0].todayStats).toBeUndefined();
   });
 
   it("does not pass today cost when provider today costs query errors", () => {
@@ -400,8 +412,8 @@ describe("ProviderList Component", () => {
       />,
     );
 
-    expect(providerCardRenderSpy.mock.calls[0][0].showTodayCost).toBe(false);
-    expect(providerCardRenderSpy.mock.calls[0][0].todayCost).toBeUndefined();
+    expect(providerCardRenderSpy.mock.calls[0][0].showTodayStats).toBe(false);
+    expect(providerCardRenderSpy.mock.calls[0][0].todayStats).toBeUndefined();
   });
 
   it("filters providers with the search input", () => {
