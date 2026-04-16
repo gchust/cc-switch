@@ -44,6 +44,7 @@ import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { settingsApi } from "@/lib/api/settings";
+import type { ProviderTodayCost } from "@/types/usage";
 
 interface ProviderListProps {
   providers: Record<string, Provider>;
@@ -137,13 +138,10 @@ export function ProviderList({
     refetchIntervalInBackground: true,
   });
 
-  const providerTodayCostMap = useMemo(
+  const providerTodayStatsMap = useMemo(
     () =>
       new Map(
-        (providerTodayCosts ?? []).map((item) => [
-          item.providerId,
-          item.totalCost,
-        ]),
+        (providerTodayCosts ?? []).map((item) => [item.providerId, item]),
       ),
     [providerTodayCosts],
   );
@@ -388,10 +386,10 @@ export function ProviderList({
                   handleToggleFailover(provider.id, enabled)
                 }
                 activeProviderId={activeProviderId}
-                showTodayCost={shouldShowProviderTodayCosts}
-                todayCost={
+                showTodayStats={shouldShowProviderTodayCosts}
+                todayStats={
                   shouldShowProviderTodayCosts
-                    ? providerTodayCostMap.get(provider.id)
+                    ? providerTodayStatsMap.get(provider.id)
                     : undefined
                 }
                 // OpenClaw: default model
@@ -525,8 +523,8 @@ interface SortableProviderCardProps {
   isInFailoverQueue: boolean;
   onToggleFailover: (enabled: boolean) => void;
   activeProviderId?: string;
-  showTodayCost?: boolean;
-  todayCost?: string;
+  showTodayStats?: boolean;
+  todayStats?: ProviderTodayCost;
   // OpenClaw: default model
   isDefaultModel?: boolean;
   onSetAsDefault?: () => void;
@@ -558,8 +556,8 @@ function SortableProviderCard({
   isInFailoverQueue,
   onToggleFailover,
   activeProviderId,
-  showTodayCost,
-  todayCost,
+  showTodayStats,
+  todayStats,
   isDefaultModel,
   onSetAsDefault,
 }: SortableProviderCardProps) {
@@ -612,8 +610,8 @@ function SortableProviderCard({
         isInFailoverQueue={isInFailoverQueue}
         onToggleFailover={onToggleFailover}
         activeProviderId={activeProviderId}
-        showTodayCost={showTodayCost}
-        todayCost={todayCost}
+        showTodayStats={showTodayStats}
+        todayStats={todayStats}
         // OpenClaw: default model
         isDefaultModel={isDefaultModel}
         onSetAsDefault={onSetAsDefault}
