@@ -35,9 +35,13 @@ pub fn get_usage_trends(
 #[tauri::command]
 pub fn get_provider_stats(
     state: State<'_, AppState>,
+    start_date: Option<i64>,
+    end_date: Option<i64>,
     app_type: Option<String>,
 ) -> Result<Vec<ProviderStats>, AppError> {
-    state.db.get_provider_stats(app_type.as_deref())
+    state
+        .db
+        .get_provider_stats(start_date, end_date, app_type.as_deref())
 }
 
 /// 获取当前应用下各 Provider 的今日成本
@@ -53,9 +57,13 @@ pub fn get_provider_today_costs(
 #[tauri::command]
 pub fn get_model_stats(
     state: State<'_, AppState>,
+    start_date: Option<i64>,
+    end_date: Option<i64>,
     app_type: Option<String>,
 ) -> Result<Vec<ModelStats>, AppError> {
-    state.db.get_model_stats(app_type.as_deref())
+    state
+        .db
+        .get_model_stats(start_date, end_date, app_type.as_deref())
 }
 
 /// 获取请求日志列表
@@ -218,6 +226,19 @@ pub fn sync_session_usage(
         }
         Err(e) => {
             result.errors.push(format!("Gemini 同步失败: {e}"));
+        }
+    }
+
+    // 同步 Hermes 使用数据
+    match crate::services::session_usage_hermes::sync_hermes_usage(&state.db) {
+        Ok(hermes_result) => {
+            result.imported += hermes_result.imported;
+            result.skipped += hermes_result.skipped;
+            result.files_scanned += hermes_result.files_scanned;
+            result.errors.extend(hermes_result.errors);
+        }
+        Err(e) => {
+            result.errors.push(format!("Hermes 同步失败: {e}"));
         }
     }
 

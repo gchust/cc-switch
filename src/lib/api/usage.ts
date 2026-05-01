@@ -64,8 +64,12 @@ export const usageApi = {
     return invoke("get_usage_trends", { startDate, endDate, appType });
   },
 
-  getProviderStats: async (appType?: string): Promise<ProviderStats[]> => {
-    return invoke("get_provider_stats", { appType });
+  getProviderStats: async (
+    startDate?: number,
+    endDate?: number,
+    appType?: string,
+  ): Promise<ProviderStats[]> => {
+    return invoke("get_provider_stats", { startDate, endDate, appType });
   },
 
   getProviderTodayCosts: async (
@@ -74,8 +78,12 @@ export const usageApi = {
     return invoke("get_provider_today_costs", { appType });
   },
 
-  getModelStats: async (appType?: string): Promise<ModelStats[]> => {
-    return invoke("get_model_stats", { appType });
+  getModelStats: async (
+    startDate?: number,
+    endDate?: number,
+    appType?: string,
+  ): Promise<ModelStats[]> => {
+    return invoke("get_model_stats", { startDate, endDate, appType });
   },
 
   getRequestLogs: async (

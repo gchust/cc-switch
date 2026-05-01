@@ -26,8 +26,7 @@ pub fn get_custom_endpoints(
         return Ok(vec![]);
     }
 
-    let mut result: Vec<_> = meta.custom_endpoints.values().cloned().collect();
-    result.sort_by_key(|item| std::cmp::Reverse(item.added_at));
+    result.sort_by_key(|ep| std::cmp::Reverse(ep.added_at));
     Ok(result)
 }
 
