@@ -175,6 +175,7 @@ jobs:
           )
 
           pr_number="$(gh pr list \
+            --repo "${GITHUB_REPOSITORY}" \
             --base "${CUSTOM_BRANCH}" \
             --head "${MIRROR_BRANCH}" \
             --state open \
@@ -182,7 +183,7 @@ jobs:
             --jq '.[0].number // empty')"
 
           if [ -n "$pr_number" ]; then
-            gh pr edit "$pr_number" --title "$title" --body "$body"
+            gh pr edit "$pr_number" --repo "${GITHUB_REPOSITORY}" --title "$title" --body "$body"
           else
-            gh pr create --base "${CUSTOM_BRANCH}" --head "${MIRROR_BRANCH}" --title "$title" --body "$body"
+            gh pr create --repo "${GITHUB_REPOSITORY}" --base "${CUSTOM_BRANCH}" --head "${MIRROR_BRANCH}" --title "$title" --body "$body"
           fi
