@@ -27,6 +27,7 @@ jobs:
         with:
           fetch-depth: 0
           ref: main
+          token: ${{ secrets.UPSTREAM_SYNC_TOKEN }}
 
       - name: Configure git identity
         shell: bash
@@ -38,7 +39,7 @@ jobs:
         id: release
         shell: bash
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.UPSTREAM_SYNC_TOKEN }}
         run: |
           set -euo pipefail
           release_tag="$(gh api "repos/${UPSTREAM_REPO}/releases/latest" --jq .tag_name)"
@@ -147,7 +148,7 @@ jobs:
         if: steps.fetch.outputs.custom_exists == 'true'
         shell: bash
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.UPSTREAM_SYNC_TOKEN }}
         run: |
           set -euo pipefail
 
