@@ -32,3 +32,4 @@ CODEBUDDY.md
 !.github/
 !.github/workflows/
 !.github/workflows/*.yml
+mainWindow.js
