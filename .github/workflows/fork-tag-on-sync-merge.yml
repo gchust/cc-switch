@@ -26,6 +26,7 @@ jobs:
         with:
           fetch-depth: 0
           ref: custom/main
+          token: ${{ secrets.UPSTREAM_SYNC_TOKEN }}
 
       - name: Configure git identity
         shell: bash
