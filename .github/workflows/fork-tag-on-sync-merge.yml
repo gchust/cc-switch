@@ -10,14 +10,13 @@ permissions:
 
 env:
   CUSTOM_BRANCH: custom/main
-  MIRROR_BRANCH: main
 
 jobs:
   tag:
     if: >
       github.event.pull_request.merged == true &&
       github.event.pull_request.head.repo.full_name == github.repository &&
-      github.event.pull_request.head.ref == 'main' &&
+      startsWith(github.event.pull_request.head.ref, 'sync/upstream/') &&
       github.event.pull_request.base.ref == 'custom/main'
     runs-on: ubuntu-latest
     steps:

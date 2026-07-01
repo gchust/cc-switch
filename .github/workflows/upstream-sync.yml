@@ -17,6 +17,7 @@ env:
   UPSTREAM_REPO: farion1231/cc-switch
   MIRROR_BRANCH: main
   CUSTOM_BRANCH: custom/main
+  SYNC_BRANCH_PREFIX: sync/upstream
 
 jobs:
   sync:
@@ -139,6 +140,27 @@ jobs:
           fi
 
           title="chore(sync): merge upstream ${{ steps.release.outputs.tag }} into ${CUSTOM_BRANCH}"
+          sync_branch="${SYNC_BRANCH_PREFIX}/${{ steps.release.outputs.tag }}"
+          sync_ref="refs/heads/${sync_branch}"
+
+          if git ls-remote --exit-code --heads origin "${sync_branch}" >/dev/null 2>&1; then
+            git fetch --no-tags origin \
+              "+${sync_ref}:refs/remotes/origin/${sync_branch}"
+            sync_sha="$(git rev-parse "origin/${sync_branch}")"
+
+            if git merge-base --is-ancestor "$mirror_sha" "$sync_sha"; then
+              echo "${sync_branch} already contains ${mirror_sha}; preserving existing sync branch."
+            elif git merge-base --is-ancestor "$sync_sha" "$mirror_sha"; then
+              git push origin "${mirror_sha}:${sync_ref}"
+              echo "Fast-forwarded ${sync_branch} to ${mirror_sha}."
+            else
+              echo "::notice::${sync_branch} diverged from ${mirror_sha}; preserving it for manual conflict resolution."
+            fi
+          else
+            git push origin "${mirror_sha}:${sync_ref}"
+            echo "Created ${sync_branch} from ${mirror_sha}."
+          fi
+
           body=$(cat <<EOF
           <!-- upstream-sync -->
           This PR syncs the latest upstream release into \`${CUSTOM_BRANCH}\`.
@@ -147,6 +169,7 @@ jobs:
           - Upstream-Release: ${{ steps.release.outputs.tag }}
           - Upstream-Commit: ${mirror_sha}
           - Mirror-Branch: ${MIRROR_BRANCH}
+          - Sync-Branch: ${sync_branch}
 
           Merge this PR into \`${CUSTOM_BRANCH}\` to trigger the fork release tag workflow.
           EOF
@@ -155,7 +178,7 @@ jobs:
           pr_number="$(gh pr list \
             --repo "${GITHUB_REPOSITORY}" \
             --base "${CUSTOM_BRANCH}" \
-            --head "${MIRROR_BRANCH}" \
+            --head "${sync_branch}" \
             --state open \
             --json number \
             --jq '.[0].number // empty')"
@@ -163,5 +186,5 @@ jobs:
           if [ -n "$pr_number" ]; then
             gh pr edit "$pr_number" --repo "${GITHUB_REPOSITORY}" --title "$title" --body "$body"
           else
-            gh pr create --repo "${GITHUB_REPOSITORY}" --base "${CUSTOM_BRANCH}" --head "${MIRROR_BRANCH}" --title "$title" --body "$body"
+            gh pr create --repo "${GITHUB_REPOSITORY}" --base "${CUSTOM_BRANCH}" --head "${sync_branch}" --title "$title" --body "$body"
           fi
