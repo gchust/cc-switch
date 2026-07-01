@@ -12,6 +12,7 @@ import type {
   PaginatedLogs,
   SessionSyncResult,
   DataSourceSummary,
+  ProviderTodayCost,
 } from "@/types/usage";
 import type { UsageResult } from "@/types";
 import type { AppId } from "./types";
@@ -108,6 +109,12 @@ export const usageApi = {
       providerName,
       model,
     });
+  },
+
+  getProviderTodayCosts: async (
+    appType: AppId,
+  ): Promise<ProviderTodayCost[]> => {
+    return invoke("get_provider_today_costs", { appType });
   },
 
   getModelStats: async (

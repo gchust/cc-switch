@@ -1,5 +1,5 @@
 import { useMemo, useState, useEffect } from "react";
-import { GripVertical, ChevronDown, ChevronUp } from "lucide-react";
+import { GripVertical, ChevronDown, ChevronUp, Info } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import type {
   DraggableAttributes,
@@ -26,6 +26,27 @@ import {
 } from "@/utils/providerConfigUtils";
 import { useProviderHealth } from "@/lib/query/failover";
 import { useUsageQuery } from "@/lib/query/queries";
+import {
+  fmtCompactNumber,
+  fmtInt,
+  fmtUsd,
+  getLocaleFromLanguage,
+  parseFiniteNumber,
+} from "@/components/usage/format";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
+import type { ProviderTodayCost } from "@/types/usage";
+
+type ProviderTodaySummary = Pick<
+  ProviderTodayCost,
+  "totalCost" | "requestCount" | "totalTokens"
+>;
+
+const EMPTY_TODAY_SUMMARY_DISPLAY = "-- · -- · --";
 
 interface DragHandleProps {
   attributes: DraggableAttributes;
@@ -60,6 +81,8 @@ interface ProviderCardProps {
   isInFailoverQueue?: boolean; // 是否在故障转移队列中
   onToggleFailover?: (enabled: boolean) => void; // 切换故障转移队列
   activeProviderId?: string; // 代理当前实际使用的供应商 ID（用于故障转移模式下标注绿色边框）
+  showTodayStats?: boolean;
+  todayStats?: ProviderTodaySummary;
   // OpenClaw: default model
   isDefaultModel?: boolean;
   onSetAsDefault?: () => void;
@@ -159,11 +182,13 @@ export function ProviderCard({
   isInFailoverQueue = false,
   onToggleFailover,
   activeProviderId,
+  showTodayStats = false,
+  todayStats,
   // OpenClaw: default model
   isDefaultModel,
   onSetAsDefault,
 }: ProviderCardProps) {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
 
   // OMO and OMO Slim share the same card behavior
   const isAnyOmo = isOmo || isOmoSlim;
@@ -290,6 +315,41 @@ export function ProviderCard({
     (!isAnyOmo &&
       !isProxyTakeover &&
       (isActiveProvider || hasPersistentConfigHighlight));
+  const locale = getLocaleFromLanguage(i18n.language);
+  const todayCostValue = parseFiniteNumber(todayStats?.totalCost);
+  const todayRequestCountValue = parseFiniteNumber(todayStats?.requestCount);
+  const todayTokenCountValue = parseFiniteNumber(todayStats?.totalTokens);
+  const isTodayCostUnavailable = todayCostValue == null;
+  const isTodayCostZero = todayCostValue === 0;
+  const todayCostDisplay = isTodayCostUnavailable
+    ? "--"
+    : isTodayCostZero
+      ? "$0.00"
+      : fmtUsd(todayCostValue, 4);
+  const todayRequestDisplay =
+    todayRequestCountValue == null
+      ? "--"
+      : fmtCompactNumber(todayRequestCountValue);
+  const todayTokenDisplay =
+    todayTokenCountValue == null
+      ? "--"
+      : fmtCompactNumber(todayTokenCountValue);
+  const hasTodaySummary =
+    !isTodayCostUnavailable ||
+    todayRequestCountValue != null ||
+    todayTokenCountValue != null;
+  const todaySummaryDisplay = hasTodaySummary
+    ? `${todayCostDisplay} · ${todayRequestDisplay} ${t(
+        "provider.todayRequestsSuffix",
+        {
+          defaultValue: "次",
+        },
+      )} · ${todayTokenDisplay} tok`
+    : EMPTY_TODAY_SUMMARY_DISPLAY;
+  const todayCostTooltip = t("provider.todayCostTooltip", {
+    defaultValue:
+      "按本地时区统计今天 00:00 至今，仅包含可归因到当前 Provider 的请求；显示 -- 表示当前无法归因，不代表实际成本为 0，也可能不覆盖会话导入、官方直连等场景。",
+  });
 
   return (
     <div
@@ -446,21 +506,94 @@ export function ProviderCard({
               )}
             </div>
 
-            {displayUrl && (
-              <button
-                type="button"
-                onClick={handleOpenWebsite}
-                className={cn(
-                  "inline-flex max-w-full items-center overflow-hidden text-left text-sm",
-                  isClickableUrl
-                    ? "text-blue-500 transition-colors hover:underline dark:text-blue-400 cursor-pointer"
-                    : "text-muted-foreground cursor-default",
+            {(displayUrl || showTodayStats) && (
+              <div className="flex flex-col gap-1 text-sm sm:grid sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center sm:gap-x-3">
+                {displayUrl ? (
+                  <button
+                    type="button"
+                    onClick={handleOpenWebsite}
+                    className={cn(
+                      "inline-flex min-w-0 items-center text-sm",
+                      isClickableUrl
+                        ? "text-blue-500 transition-colors hover:underline dark:text-blue-400 cursor-pointer"
+                        : "text-muted-foreground cursor-default",
+                    )}
+                    title={displayUrl}
+                    disabled={!isClickableUrl}
+                  >
+                    <span className="truncate">{displayUrl}</span>
+                  </button>
+                ) : (
+                  <span />
                 )}
-                title={displayUrl}
-                disabled={!isClickableUrl}
-              >
-                <span className="min-w-0 truncate">{displayUrl}</span>
-              </button>
+
+                {showTodayStats && (
+                  <TooltipProvider delayDuration={200}>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <button
+                          type="button"
+                          aria-label={`${t("provider.todaySummaryLabel", {
+                            defaultValue: "今日",
+                          })} ${todaySummaryDisplay}`}
+                          className="inline-flex max-w-full items-center gap-1 self-start rounded-sm border-0 bg-transparent p-0 text-left text-[11px] text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 sm:justify-self-end sm:text-xs"
+                        >
+                          <span className="whitespace-nowrap">
+                            {t("provider.todaySummaryLabel", {
+                              defaultValue: "今日",
+                            })}
+                          </span>
+                          <span
+                            className={cn(
+                              "font-semibold tabular-nums whitespace-nowrap",
+                              todaySummaryDisplay ===
+                                EMPTY_TODAY_SUMMARY_DISPLAY
+                                ? "text-muted-foreground"
+                                : "text-foreground",
+                            )}
+                          >
+                            {todaySummaryDisplay}
+                          </span>
+                          <Info className="h-3 w-3 opacity-70" />
+                        </button>
+                      </TooltipTrigger>
+                      <TooltipContent className="max-w-xs whitespace-normal">
+                        <div className="space-y-2">
+                          <div className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs">
+                            <span className="text-muted-foreground">
+                              {t("provider.todayCost", {
+                                defaultValue: "今日成本",
+                              })}
+                            </span>
+                            <span className="text-right font-medium tabular-nums">
+                              {todayCostDisplay}
+                            </span>
+                            <span className="text-muted-foreground">
+                              {t("provider.todayRequests", {
+                                defaultValue: "今日请求",
+                              })}
+                            </span>
+                            <span className="text-right font-medium tabular-nums">
+                              {fmtInt(todayRequestCountValue, locale)}
+                            </span>
+                            <span className="text-muted-foreground">
+                              {t("provider.todayTokens", {
+                                defaultValue: "今日 Tokens",
+                              })}
+                            </span>
+                            <span className="text-right font-medium tabular-nums">
+                              {fmtInt(todayTokenCountValue, locale)}
+                            </span>
+                          </div>
+                          <p className="text-xs text-muted-foreground">
+                            {todayCostTooltip}
+                          </p>
+                        </div>
+                      </TooltipContent>
+                    </Tooltip>
+                  </TooltipProvider>
+                )}
+              </div>
             )}
           </div>
         </div>

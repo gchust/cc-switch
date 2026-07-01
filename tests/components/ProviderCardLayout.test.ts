@@ -20,7 +20,11 @@ describe("ProviderCard layout", () => {
     expect(source).toContain("flex min-w-0 flex-1 items-center gap-2");
     expect(source).toContain("min-w-0 flex-1 space-y-1");
     expect(source).toContain(
-      "inline-flex max-w-full items-center overflow-hidden text-left text-sm",
+      "flex flex-col gap-1 text-sm sm:grid sm:grid-cols-[minmax(0,1fr)_auto]",
+    );
+    expect(source).toContain("inline-flex min-w-0 items-center text-sm");
+    expect(source).toContain(
+      '<span className="truncate">{displayUrl}</span>',
     );
   });
 });
