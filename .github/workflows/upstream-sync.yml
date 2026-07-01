@@ -15,7 +15,7 @@ concurrency:
 
 env:
   UPSTREAM_REPO: farion1231/cc-switch
-  MIRROR_BRANCH: main
+  UPSTREAM_BRANCH: main
   CUSTOM_BRANCH: custom/main
   SYNC_BRANCH_PREFIX: sync/upstream
 
@@ -23,11 +23,11 @@ jobs:
   sync:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout mirror branch
+      - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          ref: main
+          ref: custom/main
           token: ${{ secrets.UPSTREAM_SYNC_TOKEN }}
 
       - name: Configure git identity
@@ -62,9 +62,6 @@ jobs:
             git remote add upstream "https://github.com/${UPSTREAM_REPO}.git"
           fi
 
-          git fetch --no-tags origin \
-            "+refs/heads/${MIRROR_BRANCH}:refs/remotes/origin/${MIRROR_BRANCH}"
-
           custom_exists=false
           if git ls-remote --exit-code --heads origin "${CUSTOM_BRANCH}" >/dev/null 2>&1; then
             custom_exists=true
@@ -73,7 +70,7 @@ jobs:
           fi
 
           git fetch --no-tags upstream \
-            "+refs/heads/main:refs/remotes/upstream/main" \
+            "+refs/heads/${UPSTREAM_BRANCH}:refs/remotes/upstream/${UPSTREAM_BRANCH}" \
             "+refs/tags/${{ steps.release.outputs.tag }}:refs/tags/${{ steps.release.outputs.tag }}"
 
           release_sha="$(git rev-list -n 1 "${{ steps.release.outputs.tag }}")"
@@ -82,37 +79,15 @@ jobs:
             exit 1
           fi
 
-          mirror_sha="$(git rev-parse "refs/remotes/upstream/main")"
+          mirror_sha="$(git rev-parse "refs/remotes/upstream/${UPSTREAM_BRANCH}")"
           if [ -z "$mirror_sha" ]; then
-            echo "::error::Unable to resolve upstream/main."
+            echo "::error::Unable to resolve upstream/${UPSTREAM_BRANCH}."
             exit 1
           fi
 
           echo "custom_exists=$custom_exists" >> "$GITHUB_OUTPUT"
           echo "release_sha=$release_sha" >> "$GITHUB_OUTPUT"
           echo "mirror_sha=$mirror_sha" >> "$GITHUB_OUTPUT"
-
-      - name: Fast-forward mirror branch to upstream release
-        id: mirror
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          origin_main_sha="$(git rev-parse "origin/${MIRROR_BRANCH}")"
-          mirror_sha="${{ steps.fetch.outputs.mirror_sha }}"
-
-          if [ "$origin_main_sha" = "$mirror_sha" ]; then
-            echo "updated=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          if ! git merge-base --is-ancestor "$origin_main_sha" "$mirror_sha"; then
-            echo "::error::origin/${MIRROR_BRANCH} is not an ancestor of ${mirror_sha}. Refusing non-fast-forward sync."
-            exit 1
-          fi
-
-          git push origin "${mirror_sha}:refs/heads/${MIRROR_BRANCH}"
-          echo "updated=true" >> "$GITHUB_OUTPUT"
 
       - name: Bootstrap custom branch
         if: steps.fetch.outputs.custom_exists != 'true'
@@ -168,7 +143,7 @@ jobs:
           - Upstream-Repo: ${UPSTREAM_REPO}
           - Upstream-Release: ${{ steps.release.outputs.tag }}
           - Upstream-Commit: ${mirror_sha}
-          - Mirror-Branch: ${MIRROR_BRANCH}
+          - Upstream-Branch: ${UPSTREAM_BRANCH}
           - Sync-Branch: ${sync_branch}
 
           Merge this PR into \`${CUSTOM_BRANCH}\` to trigger the fork release tag workflow.
