@@ -105,6 +105,13 @@ export interface ProviderStats {
   avgLatencyMs: number;
 }
 
+export interface ProviderTodayCost {
+  providerId: string;
+  totalCost: string;
+  requestCount: number;
+  totalTokens: number;
+}
+
 export interface ModelStats {
   model: string;
   requestCount: number;

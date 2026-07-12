@@ -71,7 +71,7 @@ cd src-tauri && cargo fmt --check && cargo clippy && cargo test
 ## Pull Request Guidelines
 
 1. **Open an issue first** for new features — PRs for features that are not a good fit may be closed.
-2. **Fork and branch** — Create a feature branch from `main` (e.g., `feat/my-feature` or `fix/issue-123`).
+2. **Fork and branch** — Create a feature branch from `custom/main` (e.g., `feat/my-feature` or `fix/issue-123`). In this fork, `main` is reserved for upstream release sync.
 3. **Keep PRs focused** — One feature or fix per PR. Avoid unrelated changes.
 4. **Follow the PR template** — Fill in the summary, related issue, and checklist.
 
@@ -107,6 +107,16 @@ By submitting a PR, you agree to the following:
 5. **Maintainers may close without explanation.** PRs that appear to be unreviewed AI output — hallucinated fixes, unnecessary refactors, bulk changes with no context — may be closed at the maintainer's discretion.
 
 **In short**: AI is a tool, not a substitute for understanding. Use it to help you contribute better, not to shift work onto maintainers.
+
+## Fork Maintenance
+
+This fork uses a dual-branch model:
+
+- `main` tracks upstream release sync and should not carry local-only features.
+- `custom/main` is the default development branch for fork-specific changes.
+- `feature/*` branches should always be created from `custom/main`.
+
+See [docs/fork-maintenance.md](docs/fork-maintenance.md) for the sync and release workflow.
 
 ## Internationalization (i18n)
 
@@ -199,7 +209,7 @@ cd src-tauri && cargo fmt --check && cargo clippy && cargo test
 ## Pull Request 指南
 
 1. **先开 Issue 讨论** — 新功能请先开 Issue，不适合项目方向的 PR 可能会被关闭。
-2. **Fork 并创建分支** — 从 `main` 创建功能分支（如 `feat/my-feature` 或 `fix/issue-123`）。
+2. **Fork 并创建分支** — 从 `custom/main` 创建功能分支（如 `feat/my-feature` 或 `fix/issue-123`）。在这个 Fork 中，`main` 只用于同步上游发布版本。
 3. **保持 PR 专注** — 每个 PR 只做一件事，避免无关改动。
 4. **遵循 PR 模板** — 填写概述、关联 Issue 和检查清单。
 
@@ -235,6 +245,16 @@ chore(deps): update dependencies
 5. **维护者可以直接关闭。** 看起来是未经审阅的 AI 产出的 PR——虚构的修复、不必要的重构、缺乏上下文的批量改动——维护者可自行决定关闭。
 
 **一句话总结**：AI 是工具，不是理解力的替代品。用它来帮助你更好地贡献，而不是把工作转移给维护者。
+
+## Fork 维护约定
+
+这个 Fork 使用双主线分支模型：
+
+- `main` 用于同步上游发布版本，不承载本地定制功能。
+- `custom/main` 是默认开发分支，用于维护这个 Fork 的自定义改动。
+- `feature/*` 分支始终从 `custom/main` 拉出。
+
+同步与发版流程见 [docs/fork-maintenance.md](docs/fork-maintenance.md)。
 
 ## 国际化（i18n）
 
