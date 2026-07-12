@@ -15,6 +15,7 @@ concurrency:
 jobs:
   release:
     runs-on: ${{ matrix.os }}
+    environment: release
     outputs:
       has_tauri_signing: ${{ steps.release-mode.outputs.has_tauri_signing }}
       has_apple_signing: ${{ steps.release-mode.outputs.has_apple_signing }}
