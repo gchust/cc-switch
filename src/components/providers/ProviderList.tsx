@@ -38,6 +38,7 @@ import {
   useAddToFailoverQueue,
   useRemoveFromFailoverQueue,
 } from "@/lib/query/failover";
+import { useProviderTodayCosts } from "@/lib/query/usage";
 import {
   useCurrentOmoProviderId,
   useCurrentOmoSlimProviderId,
@@ -46,6 +47,7 @@ import { useCallback } from "react";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { isTextEditableTarget } from "@/utils/domUtils";
+import type { ProviderTodayCost } from "@/types/usage";
 
 interface ProviderListProps {
   providers: Record<string, Provider>;
@@ -96,6 +98,8 @@ export function ProviderList({
     providers,
     appId,
   );
+  const supportsTodayCost =
+    appId === "claude" || appId === "codex" || appId === "gemini";
 
   const { data: opencodeLiveIds } = useQuery({
     queryKey: ["opencodeLiveProviderIds"],
@@ -136,6 +140,29 @@ export function ProviderList({
   const { data: openclawDefaultModel } = useOpenClawDefaultModel(
     appId === "openclaw",
   );
+
+  const {
+    data: providerTodayCosts,
+    isLoading: isProviderTodayCostsLoading,
+    isError: isProviderTodayCostsError,
+  } = useProviderTodayCosts(supportsTodayCost ? appId : undefined, {
+    enabled: supportsTodayCost,
+    refetchInterval: isProxyRunning ? 30000 : false,
+    refetchIntervalInBackground: true,
+  });
+
+  const providerTodayStatsMap = useMemo(
+    () =>
+      new Map(
+        (providerTodayCosts ?? []).map((item) => [item.providerId, item]),
+      ),
+    [providerTodayCosts],
+  );
+  const shouldShowProviderTodayCosts =
+    supportsTodayCost &&
+    providerTodayCosts !== undefined &&
+    !isProviderTodayCostsLoading &&
+    !isProviderTodayCostsError;
 
   const isProviderDefaultModel = useCallback(
     (providerId: string): boolean => {
@@ -425,6 +452,12 @@ export function ProviderList({
                   handleToggleFailover(provider.id, enabled)
                 }
                 activeProviderId={activeProviderId}
+                showTodayStats={shouldShowProviderTodayCosts}
+                todayStats={
+                  shouldShowProviderTodayCosts
+                    ? providerTodayStatsMap.get(provider.id)
+                    : undefined
+                }
                 // OpenClaw: default model / Hermes: model.provider === provider.id
                 isDefaultModel={
                   appId === "hermes"
@@ -562,6 +595,8 @@ interface SortableProviderCardProps {
   isInFailoverQueue: boolean;
   onToggleFailover: (enabled: boolean) => void;
   activeProviderId?: string;
+  showTodayStats?: boolean;
+  todayStats?: ProviderTodayCost;
   // OpenClaw: default model
   isDefaultModel?: boolean;
   onSetAsDefault?: () => void;
@@ -593,6 +628,8 @@ function SortableProviderCard({
   isInFailoverQueue,
   onToggleFailover,
   activeProviderId,
+  showTodayStats,
+  todayStats,
   isDefaultModel,
   onSetAsDefault,
 }: SortableProviderCardProps) {
@@ -645,6 +682,8 @@ function SortableProviderCard({
         isInFailoverQueue={isInFailoverQueue}
         onToggleFailover={onToggleFailover}
         activeProviderId={activeProviderId}
+        showTodayStats={showTodayStats}
+        todayStats={todayStats}
         // OpenClaw: default model
         isDefaultModel={isDefaultModel}
         onSetAsDefault={onSetAsDefault}

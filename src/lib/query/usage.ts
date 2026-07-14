@@ -6,6 +6,7 @@ import type {
   UsageRangeSelection,
   UsageScopeFilters,
 } from "@/types/usage";
+import type { AppId } from "@/lib/api/types";
 
 const DEFAULT_REFETCH_INTERVAL_MS = 30000;
 
@@ -107,6 +108,8 @@ export const usageKeys = {
       filters?.providerName ?? null,
       filters?.model ?? null,
     ] as const,
+  providerTodayCosts: (appType: AppId) =>
+    [...usageKeys.all, "provider-today-costs", appType] as const,
   modelStats: (
     preset: UsageRangeSelection["preset"],
     customStartDate: number | undefined,
@@ -269,6 +272,21 @@ export function useProviderStats(
       );
     },
     refetchInterval: options?.refetchInterval ?? DEFAULT_REFETCH_INTERVAL_MS,
+    refetchIntervalInBackground: options?.refetchIntervalInBackground ?? false,
+  });
+}
+
+export function useProviderTodayCosts(
+  appType?: AppId,
+  options?: UsageQueryOptions & { enabled?: boolean },
+) {
+  return useQuery({
+    queryKey: appType
+      ? usageKeys.providerTodayCosts(appType)
+      : [...usageKeys.all, "provider-today-costs", "disabled"],
+    queryFn: () => usageApi.getProviderTodayCosts(appType!),
+    enabled: (options?.enabled ?? true) && !!appType,
+    refetchInterval: options?.refetchInterval ?? false,
     refetchIntervalInBackground: options?.refetchIntervalInBackground ?? false,
   });
 }
