@@ -125,6 +125,8 @@ pub struct RequestForwarder {
     app_handle: Option<tauri::AppHandle>,
     /// 请求开始时的"当前供应商 ID"（用于判断是否需要同步 UI/托盘）
     current_provider_id_at_start: String,
+    /// 是否由 Claude 模型精确路由选中供应商
+    model_routed: bool,
     /// 代理会话 ID（用于 Gemini Native shadow replay）
     session_id: String,
     /// Session ID 是否由客户端提供；生成值不能作为上游缓存身份。
@@ -225,6 +227,7 @@ impl RequestForwarder {
             failover_manager,
             app_handle,
             current_provider_id_at_start,
+            model_routed: false,
             session_id,
             session_client_provided,
             rectifier_config,
@@ -238,12 +241,36 @@ impl RequestForwarder {
         }
     }
 
+    pub fn with_model_routing(mut self, model_routed: bool) -> Self {
+        self.model_routed = model_routed;
+        if model_routed {
+            self.max_attempts = 1;
+        }
+        self
+    }
+
+    fn should_switch_current_provider(&self, provider_id: &str) -> bool {
+        !self.model_routed && self.current_provider_id_at_start.as_str() != provider_id
+    }
+
+    async fn update_active_provider(&self, app_type: &str, provider: &Provider) {
+        let mut current_providers = self.current_providers.write().await;
+        current_providers.insert(
+            app_type.to_string(),
+            (provider.id.clone(), provider.name.clone()),
+        );
+    }
+
     async fn record_success_result(
         &self,
         provider_id: &str,
         app_type: &str,
         used_half_open_permit: bool,
     ) {
+        if self.model_routed {
+            return;
+        }
+
         if used_half_open_permit {
             if let Err(e) = self
                 .router
@@ -274,7 +301,7 @@ impl RequestForwarder {
 
     /// 整流（thinking signature 或 budget）重试失败后的统一收尾。
     ///
-    /// `None` 表示已记录熔断器、累积 `last_error`/`last_provider`，
+    /// `None` 表示已累积 `last_error`/`last_provider`（普通故障转移请求还会记录熔断器），
     /// 调用方应 `continue` 让下一家 provider 继续故障转移；
     /// `Some(ForwardError)` 表示是客户端错误，没有 provider 能修复，
     /// 调用方应直接 `return` 把错误返回给客户端。
@@ -298,16 +325,18 @@ impl RequestForwarder {
         };
 
         if is_provider_error {
-            let _ = self
-                .router
-                .record_result(
-                    &provider.id,
-                    app_type_str,
-                    used_half_open_permit,
-                    false,
-                    Some(retry_err.to_string()),
-                )
-                .await;
+            if !self.model_routed {
+                let _ = self
+                    .router
+                    .record_result(
+                        &provider.id,
+                        app_type_str,
+                        used_half_open_permit,
+                        false,
+                        Some(retry_err.to_string()),
+                    )
+                    .await;
+            }
             {
                 let mut status = self.status.write().await;
                 status.last_error = Some(format!(
@@ -495,22 +524,14 @@ impl RequestForwarder {
                     self.record_success_result(&provider.id, app_type_str, used_half_open_permit)
                         .await;
 
-                    // 更新当前应用类型使用的 provider
-                    {
-                        let mut current_providers = self.current_providers.write().await;
-                        current_providers.insert(
-                            app_type_str.to_string(),
-                            (provider.id.clone(), provider.name.clone()),
-                        );
-                    }
+                    self.update_active_provider(app_type_str, provider).await;
 
                     // 更新成功统计
                     {
                         let mut status = self.status.write().await;
                         status.success_requests += 1;
                         status.last_error = None;
-                        let should_switch =
-                            self.current_provider_id_at_start.as_str() != provider.id.as_str();
+                        let should_switch = self.should_switch_current_provider(&provider.id);
                         if should_switch {
                             status.failover_count += 1;
 
@@ -599,22 +620,14 @@ impl RequestForwarder {
                                     )
                                     .await;
 
-                                    {
-                                        let mut current_providers =
-                                            self.current_providers.write().await;
-                                        current_providers.insert(
-                                            app_type_str.to_string(),
-                                            (provider.id.clone(), provider.name.clone()),
-                                        );
-                                    }
+                                    self.update_active_provider(app_type_str, provider).await;
 
                                     {
                                         let mut status = self.status.write().await;
                                         status.success_requests += 1;
                                         status.last_error = None;
                                         let should_switch =
-                                            self.current_provider_id_at_start.as_str()
-                                                != provider.id.as_str();
+                                            self.should_switch_current_provider(&provider.id);
                                         if should_switch {
                                             status.failover_count += 1;
                                             let fm = self.failover_manager.clone();
@@ -743,15 +756,7 @@ impl RequestForwarder {
                                         )
                                         .await;
 
-                                        // 更新当前应用类型使用的 provider
-                                        {
-                                            let mut current_providers =
-                                                self.current_providers.write().await;
-                                            current_providers.insert(
-                                                app_type_str.to_string(),
-                                                (provider.id.clone(), provider.name.clone()),
-                                            );
-                                        }
+                                        self.update_active_provider(app_type_str, provider).await;
 
                                         // 更新成功统计
                                         {
@@ -759,8 +764,7 @@ impl RequestForwarder {
                                             status.success_requests += 1;
                                             status.last_error = None;
                                             let should_switch =
-                                                self.current_provider_id_at_start.as_str()
-                                                    != provider.id.as_str();
+                                                self.should_switch_current_provider(&provider.id);
                                             if should_switch {
                                                 status.failover_count += 1;
 
@@ -909,22 +913,14 @@ impl RequestForwarder {
                                     )
                                     .await;
 
-                                    {
-                                        let mut current_providers =
-                                            self.current_providers.write().await;
-                                        current_providers.insert(
-                                            app_type_str.to_string(),
-                                            (provider.id.clone(), provider.name.clone()),
-                                        );
-                                    }
+                                    self.update_active_provider(app_type_str, provider).await;
 
                                     {
                                         let mut status = self.status.write().await;
                                         status.success_requests += 1;
                                         status.last_error = None;
                                         let should_switch =
-                                            self.current_provider_id_at_start.as_str()
-                                                != provider.id.as_str();
+                                            self.should_switch_current_provider(&provider.id);
                                         if should_switch {
                                             status.failover_count += 1;
                                             let fm = self.failover_manager.clone();
@@ -1006,17 +1002,19 @@ impl RequestForwarder {
 
                     match category {
                         ErrorCategory::Retryable => {
-                            // 可重试：真正的 provider 故障 → 记录失败并更新熔断器/DB 健康度
-                            let _ = self
-                                .router
-                                .record_result(
-                                    &provider.id,
-                                    app_type_str,
-                                    used_half_open_permit,
-                                    false,
-                                    Some(e.to_string()),
-                                )
-                                .await;
+                            // 普通故障转移请求记录 provider 故障；模型精确路由不污染共享熔断器/健康度。
+                            if !self.model_routed {
+                                let _ = self
+                                    .router
+                                    .record_result(
+                                        &provider.id,
+                                        app_type_str,
+                                        used_half_open_permit,
+                                        false,
+                                        Some(e.to_string()),
+                                    )
+                                    .await;
+                            }
 
                             {
                                 let mut status = self.status.write().await;
@@ -3497,6 +3495,7 @@ mod tests {
             failover_manager: Arc::new(FailoverSwitchManager::new(db)),
             app_handle: None,
             current_provider_id_at_start: String::new(),
+            model_routed: false,
             session_id: String::new(),
             session_client_provided: false,
             rectifier_config: RectifierConfig::default(),
@@ -3506,6 +3505,19 @@ mod tests {
             streaming_first_byte_timeout,
             max_attempts: 1,
         }
+    }
+
+    #[test]
+    fn model_routing_suppresses_global_provider_switch() {
+        let mut forwarder = test_forwarder(Duration::ZERO, Duration::ZERO);
+        forwarder.current_provider_id_at_start = "provider-a".to_string();
+        forwarder.max_attempts = 4;
+
+        assert!(forwarder.should_switch_current_provider("provider-b"));
+
+        let routed = forwarder.with_model_routing(true);
+        assert!(!routed.should_switch_current_provider("provider-b"));
+        assert_eq!(routed.max_attempts, 1);
     }
 
     #[test]

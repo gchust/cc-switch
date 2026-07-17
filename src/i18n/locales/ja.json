@@ -355,6 +355,10 @@
         "title": "自動フェイルオーバー",
         "description": "フェイルオーバーキューとサーキットブレーカー戦略を設定"
       },
+      "modelProviderMapping": {
+        "title": "Claude モデルルーティング",
+        "description": "完全一致する Claude モデル ID を指定プロバイダーへルーティング"
+      },
       "pricing": {
         "title": "コスト計算",
         "description": "各モデルのトークン料金ルールを管理"
@@ -2469,6 +2473,22 @@
     }
   },
   "proxy": {
+    "modelProviderMapping": {
+      "description": "ルート表が空でない場合、Claude リクエストは設定済みモデル ID と完全一致する必要があります。一致したリクエストは指定プロバイダーだけを使用し、不一致なら上流へ送信せずローカルで失敗します。",
+      "modelId": "Claude モデル ID",
+      "modelPlaceholder": "例: deepseek-v3.1",
+      "provider": "プロバイダー",
+      "providerPlaceholder": "プロバイダーを選択",
+      "add": "マッピングを追加",
+      "empty": "モデルルートは未設定です。既存のプロバイダー選択が引き続き使用されます。",
+      "saved": "Claude モデルルートを保存しました",
+      "saveFailed": "Claude モデルルートの保存に失敗しました: {{error}}",
+      "incomplete": "保存前にすべてのモデル ID とプロバイダーを入力してください。",
+      "duplicateModel": "同じモデル ID は一度だけ設定できます。",
+      "missingProvider": "プロバイダーが見つかりません（{{id}}）",
+      "loadFailed": "Claude モデルルートを読み込めませんでした。既存のルートは変更されていません。",
+      "providerLoadFailed": "Claude プロバイダーを読み込めませんでした。既存のルートは変更されていません。"
+    },
     "panel": {
       "serviceAddress": "サービスアドレス",
       "addressCopied": "アドレスをコピーしました",

@@ -41,6 +41,8 @@ pub struct RequestContext {
     pub provider: Provider,
     /// 完整的 Provider 列表（用于故障转移）
     providers: Vec<Provider>,
+    /// 是否由 Claude 模型精确路由选中供应商
+    model_routed: bool,
     /// 请求开始时的"当前供应商"（用于判断是否需要同步 UI/托盘）
     ///
     /// 这里使用本地 settings 的设备级 current provider。
@@ -131,11 +133,14 @@ impl RequestContext {
 
         // 使用共享的 ProviderRouter 选择 Provider（熔断器状态跨请求保持）
         // 注意：只在这里调用一次，结果传递给 forwarder，避免重复消耗 HalfOpen 名额
-        let providers = state
+        let (providers, model_routed) = state
             .provider_router
-            .select_providers(app_type_str)
+            .select_providers_for_model(app_type_str, &request_model)
             .await
             .map_err(|e| match e {
+                crate::error::AppError::InvalidInput(message) => {
+                    ProxyError::InvalidRequest(message)
+                }
                 crate::error::AppError::AllProvidersCircuitOpen => {
                     ProxyError::AllProvidersCircuitOpen
                 }
@@ -162,6 +167,7 @@ impl RequestContext {
             app_config,
             provider,
             providers,
+            model_routed,
             current_provider_id,
             request_model,
             outbound_model: None,
@@ -216,11 +222,11 @@ impl RequestContext {
                 (0, 0, 0)
             };
 
-        // 故障转移关闭时强制 max_retries=0（仅尝试 1 个 provider），与「不超时 + 不切换」语义一致。
-        let max_retries = if self.app_config.auto_failover_enabled {
-            self.app_config.max_retries
-        } else {
+        // 模型精确路由和故障转移关闭时都只允许尝试一个 provider。
+        let max_retries = if self.model_routed || !self.app_config.auto_failover_enabled {
             0
+        } else {
+            self.app_config.max_retries
         };
 
         RequestForwarder::new(
@@ -242,6 +248,7 @@ impl RequestContext {
             self.copilot_optimizer_config.clone(),
             max_retries,
         )
+        .with_model_routing(self.model_routed)
     }
 
     /// 获取 Provider 列表（用于故障转移）

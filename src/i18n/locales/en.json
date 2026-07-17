@@ -355,6 +355,10 @@
         "title": "Auto Failover",
         "description": "Configure failover queue and circuit breaker strategy"
       },
+      "modelProviderMapping": {
+        "title": "Claude Model Routing",
+        "description": "Route exact Claude model IDs to selected providers"
+      },
       "pricing": {
         "title": "Cost Pricing",
         "description": "Manage token pricing rules for each model"
@@ -2469,6 +2473,22 @@
     }
   },
   "proxy": {
+    "modelProviderMapping": {
+      "description": "When this map is non-empty, Claude requests must exactly match a configured model ID. Matching requests use only the selected provider; unmatched requests fail locally without contacting an upstream provider.",
+      "modelId": "Claude Model ID",
+      "modelPlaceholder": "For example: deepseek-v3.1",
+      "provider": "Provider",
+      "providerPlaceholder": "Select a provider",
+      "add": "Add Mapping",
+      "empty": "No model routes configured. Existing provider selection remains active.",
+      "saved": "Claude model routes saved",
+      "saveFailed": "Failed to save Claude model routes: {{error}}",
+      "incomplete": "Complete every model ID and provider before saving.",
+      "duplicateModel": "Each model ID can appear only once.",
+      "missingProvider": "Missing provider ({{id}})",
+      "loadFailed": "Failed to load Claude model routes. Existing routes were not changed.",
+      "providerLoadFailed": "Failed to load Claude providers. Existing routes were not changed."
+    },
     "panel": {
       "serviceAddress": "Service Address",
       "addressCopied": "Address copied",

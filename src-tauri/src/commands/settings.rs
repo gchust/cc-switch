@@ -626,6 +626,52 @@ pub async fn get_auto_launch_status() -> Result<bool, String> {
     crate::auto_launch::is_auto_launch_enabled().map_err(|e| format!("获取开机自启状态失败: {e}"))
 }
 
+/// 获取 Claude 模型到供应商的精确路由表
+#[tauri::command]
+pub async fn get_claude_model_provider_map(
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<std::collections::BTreeMap<String, String>, String> {
+    state
+        .db
+        .get_claude_model_provider_map()
+        .map_err(|e| e.to_string())
+}
+
+/// 设置 Claude 模型到供应商的精确路由表
+#[tauri::command]
+pub async fn set_claude_model_provider_map(
+    state: tauri::State<'_, crate::AppState>,
+    mappings: std::collections::BTreeMap<String, String>,
+) -> Result<bool, String> {
+    for (model_id, provider_id) in &mappings {
+        if model_id.trim().is_empty() {
+            return Err("Claude 模型 ID 不能为空".to_string());
+        }
+        if model_id.trim() != model_id {
+            return Err(format!("Claude 模型 ID 不能包含首尾空格: {model_id}"));
+        }
+
+        let provider = state
+            .db
+            .get_provider_by_id(provider_id, "claude")
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("Claude 模型 {model_id} 指向的供应商不存在: {provider_id}"))?;
+        if provider.category.as_deref() == Some("official")
+            || crate::database::is_official_seed_id(provider_id)
+        {
+            return Err(format!(
+                "Claude 模型 {model_id} 不能路由到官方供应商: {provider_id}"
+            ));
+        }
+    }
+
+    state
+        .db
+        .set_claude_model_provider_map(&mappings)
+        .map_err(|e| e.to_string())?;
+    Ok(true)
+}
+
 /// 获取整流器配置
 #[tauri::command]
 pub async fn get_rectifier_config(

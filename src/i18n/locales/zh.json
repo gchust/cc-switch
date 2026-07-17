@@ -355,6 +355,10 @@
         "title": "自动故障转移",
         "description": "配置故障转移队列和熔断策略"
       },
+      "modelProviderMapping": {
+        "title": "Claude 模型路由",
+        "description": "将精确的 Claude 模型 ID 路由到指定供应商"
+      },
       "pricing": {
         "title": "成本定价",
         "description": "管理各模型 Token 计费规则"
@@ -2469,6 +2473,22 @@
     }
   },
   "proxy": {
+    "modelProviderMapping": {
+      "description": "路由表非空时，Claude 请求必须精确匹配已配置的模型 ID。命中后只使用指定供应商；未命中时在本地直接报错，不会向任何上游发送请求。",
+      "modelId": "Claude 模型 ID",
+      "modelPlaceholder": "例如：deepseek-v3.1",
+      "provider": "供应商",
+      "providerPlaceholder": "选择供应商",
+      "add": "添加映射",
+      "empty": "尚未配置模型路由，将继续使用现有供应商选择逻辑。",
+      "saved": "Claude 模型路由已保存",
+      "saveFailed": "保存 Claude 模型路由失败：{{error}}",
+      "incomplete": "保存前请填写每一行的模型 ID 和供应商。",
+      "duplicateModel": "同一个模型 ID 只能配置一次。",
+      "missingProvider": "供应商不存在（{{id}}）",
+      "loadFailed": "加载 Claude 模型路由失败，现有路由未被更改。",
+      "providerLoadFailed": "加载 Claude 供应商失败，现有路由未被更改。"
+    },
     "panel": {
       "serviceAddress": "服务地址",
       "addressCopied": "地址已复制",

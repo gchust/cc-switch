@@ -29,6 +29,60 @@ impl ProviderRouter {
         }
     }
 
+    /// 按 Claude 请求模型精确选择供应商。
+    ///
+    /// 路由表为空时保留现有选择逻辑；一旦配置了任意路由，Claude 请求必须精确命中，
+    /// 并且只返回对应的单个供应商，不进入故障转移队列或熔断器探测。
+    pub async fn select_providers_for_model(
+        &self,
+        app_type: &str,
+        request_model: &str,
+    ) -> Result<(Vec<Provider>, bool), AppError> {
+        if app_type != "claude" {
+            return self
+                .select_providers(app_type)
+                .await
+                .map(|providers| (providers, false));
+        }
+
+        let mappings = self.db.get_claude_model_provider_map()?;
+        if mappings.is_empty() {
+            return self
+                .select_providers(app_type)
+                .await
+                .map(|providers| (providers, false));
+        }
+
+        let provider_id = mappings.get(request_model).ok_or_else(|| {
+            AppError::InvalidInput(format!(
+                "Claude 模型未配置本地供应商路由: {request_model}"
+            ))
+        })?;
+        let provider = self
+            .db
+            .get_provider_by_id(provider_id, "claude")?
+            .ok_or_else(|| {
+                AppError::InvalidInput(format!(
+                    "Claude 模型 {request_model} 指向的供应商不存在: {provider_id}"
+                ))
+            })?;
+        if provider.category.as_deref() == Some("official")
+            || crate::database::is_official_seed_id(provider_id)
+        {
+            return Err(AppError::InvalidInput(format!(
+                "Claude 模型 {request_model} 不能路由到官方供应商: {provider_id}"
+            )));
+        }
+
+        log::debug!(
+            "[claude] 模型本地路由命中: model={}, provider={} ({})",
+            request_model,
+            provider.name,
+            provider.id
+        );
+        Ok((vec![provider], true))
+    }
+
     /// 选择可用的供应商（支持故障转移）
     ///
     /// 返回按优先级排序的可用供应商列表：
@@ -519,5 +573,125 @@ mod tests {
         let third = router.allow_provider_request("a", "claude").await;
         assert!(third.allowed);
         assert!(third.used_half_open_permit);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_model_route_selects_exact_provider_without_failover() {
+        let _home = TempHome::new();
+        let db = Arc::new(Database::memory().unwrap());
+        let provider_a =
+            Provider::with_id("a".to_string(), "Provider A".to_string(), json!({}), None);
+        let provider_b =
+            Provider::with_id("b".to_string(), "Provider B".to_string(), json!({}), None);
+        db.save_provider("claude", &provider_a).unwrap();
+        db.save_provider("claude", &provider_b).unwrap();
+        db.set_current_provider("claude", "a").unwrap();
+        db.set_claude_model_provider_map(&std::collections::BTreeMap::from([(
+            "deepseek-v3.1".to_string(),
+            "b".to_string(),
+        )]))
+        .unwrap();
+
+        let router = ProviderRouter::new(db);
+        let (providers, model_routed) = router
+            .select_providers_for_model("claude", "deepseek-v3.1")
+            .await
+            .unwrap();
+
+        assert!(model_routed);
+        assert_eq!(providers.len(), 1);
+        assert_eq!(providers[0].id, "b");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_nonempty_model_route_map_rejects_unmapped_model() {
+        let _home = TempHome::new();
+        let db = Arc::new(Database::memory().unwrap());
+        let provider =
+            Provider::with_id("a".to_string(), "Provider A".to_string(), json!({}), None);
+        db.save_provider("claude", &provider).unwrap();
+        db.set_current_provider("claude", "a").unwrap();
+        db.set_claude_model_provider_map(&std::collections::BTreeMap::from([(
+            "deepseek-v3.1".to_string(),
+            "a".to_string(),
+        )]))
+        .unwrap();
+
+        let router = ProviderRouter::new(db);
+        let error = router
+            .select_providers_for_model("claude", "DeepSeek-V3.1")
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, AppError::InvalidInput(_)));
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_empty_model_route_map_preserves_legacy_selection() {
+        let _home = TempHome::new();
+        let db = Arc::new(Database::memory().unwrap());
+        let provider =
+            Provider::with_id("a".to_string(), "Provider A".to_string(), json!({}), None);
+        db.save_provider("claude", &provider).unwrap();
+        db.set_current_provider("claude", "a").unwrap();
+
+        let router = ProviderRouter::new(db);
+        let (providers, model_routed) = router
+            .select_providers_for_model("claude", "claude-opus-4-6")
+            .await
+            .unwrap();
+
+        assert!(!model_routed);
+        assert_eq!(providers[0].id, "a");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_model_route_rejects_official_provider() {
+        let _home = TempHome::new();
+        let db = Arc::new(Database::memory().unwrap());
+        let provider = Provider::with_id(
+            "claude-official".to_string(),
+            "Official".to_string(),
+            json!({}),
+            None,
+        );
+        db.save_provider("claude", &provider).unwrap();
+        db.set_claude_model_provider_map(&std::collections::BTreeMap::from([(
+            "claude-opus-4-6".to_string(),
+            "claude-official".to_string(),
+        )]))
+        .unwrap();
+
+        let router = ProviderRouter::new(db);
+        let error = router
+            .select_providers_for_model("claude", "claude-opus-4-6")
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, AppError::InvalidInput(_)));
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_model_route_with_deleted_provider_fails_closed() {
+        let _home = TempHome::new();
+        let db = Arc::new(Database::memory().unwrap());
+        db.set_claude_model_provider_map(&std::collections::BTreeMap::from([(
+            "mimo-v2".to_string(),
+            "deleted".to_string(),
+        )]))
+        .unwrap();
+
+        let router = ProviderRouter::new(db);
+        let error = router
+            .select_providers_for_model("claude", "mimo-v2")
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, AppError::InvalidInput(_)));
     }
 }

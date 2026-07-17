@@ -276,6 +276,16 @@ export const settingsApi = {
     return await invoke("probe_tool_installations", { tools });
   },
 
+  async getClaudeModelProviderMap(): Promise<ClaudeModelProviderMap> {
+    return await invoke("get_claude_model_provider_map");
+  },
+
+  async setClaudeModelProviderMap(
+    mappings: ClaudeModelProviderMap,
+  ): Promise<boolean> {
+    return await invoke("set_claude_model_provider_map", { mappings });
+  },
+
   async getRectifierConfig(): Promise<RectifierConfig> {
     return await invoke("get_rectifier_config");
   },
@@ -320,6 +330,8 @@ export interface ToolInstallationReport {
   command: string;
   anchored: boolean;
 }
+
+export type ClaudeModelProviderMap = Record<string, string>;
 
 export interface RectifierConfig {
   enabled: boolean;

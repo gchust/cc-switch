@@ -5,9 +5,11 @@
 use crate::database::{lock_conn, Database};
 use crate::error::AppError;
 use rusqlite::params;
+use std::collections::BTreeMap;
 
 impl Database {
     const LEGACY_COMMON_CONFIG_MIGRATED_KEY: &'static str = "common_config_legacy_migrated_v1";
+    const CLAUDE_MODEL_PROVIDER_MAP_KEY: &'static str = "claude_model_provider_map";
 
     fn config_snippet_cleared_key(app_type: &str) -> String {
         format!("common_config_{app_type}_cleared")
@@ -54,6 +56,27 @@ impl Database {
         )
         .map_err(|e| AppError::Database(e.to_string()))?;
         Ok(())
+    }
+
+    /// 获取 Claude 模型到供应商的精确路由表。
+    pub fn get_claude_model_provider_map(
+        &self,
+    ) -> Result<BTreeMap<String, String>, AppError> {
+        match self.get_setting(Self::CLAUDE_MODEL_PROVIDER_MAP_KEY)? {
+            Some(json) => serde_json::from_str(&json)
+                .map_err(|e| AppError::Database(format!("解析 Claude 模型路由配置失败: {e}"))),
+            None => Ok(BTreeMap::new()),
+        }
+    }
+
+    /// 更新 Claude 模型到供应商的精确路由表。
+    pub fn set_claude_model_provider_map(
+        &self,
+        mappings: &BTreeMap<String, String>,
+    ) -> Result<(), AppError> {
+        let json = serde_json::to_string(mappings)
+            .map_err(|e| AppError::Database(format!("序列化 Claude 模型路由配置失败: {e}")))?;
+        self.set_setting(Self::CLAUDE_MODEL_PROVIDER_MAP_KEY, &json)
     }
 
     // --- 通用配置片段 (Common Config Snippet) ---
@@ -323,5 +346,44 @@ impl Database {
         let json = serde_json::to_string(config)
             .map_err(|e| AppError::Database(format!("序列化日志配置失败: {e}")))?;
         self.set_setting("log_config", &json)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn claude_model_provider_map_defaults_to_empty() {
+        let db = Database::memory().expect("memory database");
+
+        assert!(db
+            .get_claude_model_provider_map()
+            .expect("read default mappings")
+            .is_empty());
+    }
+
+    #[test]
+    fn claude_model_provider_map_round_trips_in_stable_order() {
+        let db = Database::memory().expect("memory database");
+        let mappings = BTreeMap::from([
+            ("mimo-v2".to_string(), "provider-b".to_string()),
+            ("deepseek-v3.1".to_string(), "provider-a".to_string()),
+        ]);
+
+        db.set_claude_model_provider_map(&mappings)
+            .expect("save mappings");
+
+        assert_eq!(
+            db.get_claude_model_provider_map()
+                .expect("read mappings"),
+            mappings
+        );
+        assert_eq!(
+            db.get_setting(Database::CLAUDE_MODEL_PROVIDER_MAP_KEY)
+                .expect("read raw setting")
+                .as_deref(),
+            Some(r#"{"deepseek-v3.1":"provider-a","mimo-v2":"provider-b"}"#)
+        );
     }
 }

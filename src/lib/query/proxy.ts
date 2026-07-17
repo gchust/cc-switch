@@ -1,8 +1,15 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { proxyApi } from "@/lib/api/proxy";
+import {
+  settingsApi,
+  type ClaudeModelProviderMap,
+} from "@/lib/api/settings";
 import { toast } from "sonner";
 import { useTranslation } from "react-i18next";
 import type { GlobalProxyConfig, AppProxyConfig } from "@/types/proxy";
+import { extractErrorMessage } from "@/utils/errorUtils";
+
+const CLAUDE_MODEL_PROVIDER_MAP_KEY = ["claudeModelProviderMap"] as const;
 
 // ========== 代理服务器状态 Hooks ==========
 
@@ -237,6 +244,36 @@ export function useUpdateAppProxyConfig() {
     onError: (error: Error) => {
       toast.error(
         t("proxy.settings.toast.saveFailed", { error: error.message }),
+      );
+    },
+  });
+}
+
+export function useClaudeModelProviderMap() {
+  return useQuery({
+    queryKey: CLAUDE_MODEL_PROVIDER_MAP_KEY,
+    queryFn: () => settingsApi.getClaudeModelProviderMap(),
+  });
+}
+
+export function useUpdateClaudeModelProviderMap() {
+  const queryClient = useQueryClient();
+  const { t } = useTranslation();
+
+  return useMutation({
+    mutationFn: (mappings: ClaudeModelProviderMap) =>
+      settingsApi.setClaudeModelProviderMap(mappings),
+    onSuccess: (_, mappings) => {
+      queryClient.setQueryData(CLAUDE_MODEL_PROVIDER_MAP_KEY, mappings);
+      toast.success(t("proxy.modelProviderMapping.saved"), {
+        closeButton: true,
+      });
+    },
+    onError: (error: unknown) => {
+      toast.error(
+        t("proxy.modelProviderMapping.saveFailed", {
+          error: extractErrorMessage(error),
+        }),
       );
     },
   });

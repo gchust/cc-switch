@@ -1224,6 +1224,8 @@ pub fn run() {
             commands::save_settings,
             commands::has_codex_unify_history_backup,
             commands::restore_codex_unified_history,
+            commands::get_claude_model_provider_map,
+            commands::set_claude_model_provider_map,
             commands::get_rectifier_config,
             commands::set_rectifier_config,
             commands::get_optimizer_config,
