@@ -54,9 +54,7 @@ impl ProviderRouter {
         }
 
         let provider_id = mappings.get(request_model).ok_or_else(|| {
-            AppError::InvalidInput(format!(
-                "Claude 模型未配置本地供应商路由: {request_model}"
-            ))
+            AppError::InvalidInput(format!("Claude 模型未配置本地供应商路由: {request_model}"))
         })?;
         let provider = self
             .db

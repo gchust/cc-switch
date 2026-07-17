@@ -1,9 +1,6 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { proxyApi } from "@/lib/api/proxy";
-import {
-  settingsApi,
-  type ClaudeModelProviderMap,
-} from "@/lib/api/settings";
+import { settingsApi, type ClaudeModelProviderMap } from "@/lib/api/settings";
 import { toast } from "sonner";
 import { useTranslation } from "react-i18next";
 import type { GlobalProxyConfig, AppProxyConfig } from "@/types/proxy";

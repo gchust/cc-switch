@@ -59,9 +59,7 @@ impl Database {
     }
 
     /// 获取 Claude 模型到供应商的精确路由表。
-    pub fn get_claude_model_provider_map(
-        &self,
-    ) -> Result<BTreeMap<String, String>, AppError> {
+    pub fn get_claude_model_provider_map(&self) -> Result<BTreeMap<String, String>, AppError> {
         match self.get_setting(Self::CLAUDE_MODEL_PROVIDER_MAP_KEY)? {
             Some(json) => serde_json::from_str(&json)
                 .map_err(|e| AppError::Database(format!("解析 Claude 模型路由配置失败: {e}"))),
@@ -375,8 +373,7 @@ mod tests {
             .expect("save mappings");
 
         assert_eq!(
-            db.get_claude_model_provider_map()
-                .expect("read mappings"),
+            db.get_claude_model_provider_map().expect("read mappings"),
             mappings
         );
         assert_eq!(
