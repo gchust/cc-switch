@@ -205,6 +205,37 @@ describe("ProviderList Component", () => {
     expect(handleCreate).toHaveBeenCalledTimes(1);
   });
 
+  it("should keep the add provider action available when providers exist", () => {
+    const provider = createProvider();
+    const handleCreate = vi.fn();
+    useDragSortMock.mockReturnValueOnce({
+      sortedProviders: [provider],
+      sensors: [],
+      handleDragEnd: vi.fn(),
+    });
+
+    renderWithQueryClient(
+      <ProviderList
+        providers={{ [provider.id]: provider }}
+        currentProviderId={provider.id}
+        appId="codex"
+        onSwitch={vi.fn()}
+        onEdit={vi.fn()}
+        onDelete={vi.fn()}
+        onDuplicate={vi.fn()}
+        onOpenWebsite={vi.fn()}
+        onCreate={handleCreate}
+      />,
+    );
+
+    const addButton = screen.getByRole("button", {
+      name: "provider.addProvider",
+    });
+    fireEvent.click(addButton);
+
+    expect(handleCreate).toHaveBeenCalledTimes(1);
+  });
+
   it("should render in order returned by useDragSort and pass through action callbacks", () => {
     const providerA = createProvider({ id: "a", name: "A" });
     const providerB = createProvider({ id: "b", name: "B" });
@@ -251,12 +282,12 @@ describe("ProviderList Component", () => {
     // Drag attributes from useSortable
     expect(
       providerCardRenderSpy.mock.calls[0][0].dragHandleProps?.attributes[
-      "data-dnd-id"
+        "data-dnd-id"
       ],
     ).toBe("b");
     expect(
       providerCardRenderSpy.mock.calls[1][0].dragHandleProps?.attributes[
-      "data-dnd-id"
+        "data-dnd-id"
       ],
     ).toBe("a");
 
