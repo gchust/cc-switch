@@ -2361,6 +2361,23 @@ impl ProviderService {
         Ok(true)
     }
 
+    fn ensure_claude_provider_not_model_routed(
+        state: &AppState,
+        provider_id: &str,
+    ) -> Result<(), AppError> {
+        if state
+            .db
+            .get_claude_model_provider_map()?
+            .values()
+            .any(|mapped_provider_id| mapped_provider_id == provider_id)
+        {
+            return Err(AppError::Message(
+                "无法删除模型路由正在使用的供应商，请先移除对应的 Claude 模型路由".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
     /// Delete a provider
     ///
     /// 同时检查本地 settings 和数据库的当前供应商，防止删除任一端正在使用的供应商。
@@ -2412,6 +2429,11 @@ impl ProviderService {
             }
             state.db.delete_provider(app_type.as_str(), id)?;
             return Ok(());
+        }
+
+        // Claude 模型路由保存的是 provider ID。先阻止删除被引用的供应商，避免留下失效路由。
+        if matches!(app_type, AppType::Claude) {
+            Self::ensure_claude_provider_not_model_routed(state, id)?;
         }
 
         // For other apps: Check both local settings and database
@@ -3886,6 +3908,12 @@ impl ProviderService {
     pub fn delete_universal(state: &AppState, id: &str) -> Result<bool, AppError> {
         // 获取统一供应商（用于删除生成的子供应商）
         let provider = state.db.get_universal_provider(id)?;
+        if let Some(provider) = provider.as_ref() {
+            if provider.apps.claude {
+                let claude_id = format!("universal-claude-{id}");
+                Self::ensure_claude_provider_not_model_routed(state, &claude_id)?;
+            }
+        }
 
         // 删除统一供应商
         state.db.delete_universal_provider(id)?;
@@ -3928,6 +3956,7 @@ impl ProviderService {
         } else {
             // 如果禁用了 Claude，删除对应的子供应商
             let claude_id = format!("universal-claude-{id}");
+            Self::ensure_claude_provider_not_model_routed(state, &claude_id)?;
             let _ = state.db.delete_provider("claude", &claude_id);
         }
 
