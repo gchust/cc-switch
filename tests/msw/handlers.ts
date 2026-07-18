@@ -339,6 +339,7 @@ export const handlers = [
       claude: false,
       codex: false,
       gemini: false,
+      grokbuild: false,
     }),
   ),
 
