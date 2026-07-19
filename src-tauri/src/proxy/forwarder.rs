@@ -1187,6 +1187,13 @@ impl RequestForwarder {
                 super::model_mapper::strip_one_m_suffix_for_upstream_from_body(mapped_body);
         }
 
+        // A model route selects a different Codex provider, but a native
+        // Responses upstream does not pass through either conversion branch
+        // below. Resolve its configured upstream model here as well, so an
+        // alias from the active provider's catalog is never sent unchanged to
+        // the routed provider.
+        apply_routed_codex_upstream_model(app_type, self.model_routed, provider, &mut mapped_body);
+
         // --- Copilot 优化器：分类 + 请求体优化（在格式转换之前执行） ---
         // 注意：确定性 ID 也在此处计算，因为 mapped_body 在格式转换时会被 move
         //
@@ -2819,6 +2826,20 @@ fn is_codex_client_fingerprint_header(key_str: &str) -> bool {
         || key_str.starts_with("x-codex-")
 }
 
+/// A provider selected by the exact Codex model router may differ from the one
+/// that generated the client's catalog. Resolve the target provider's model on
+/// every wire format, including native Responses where no conversion occurs.
+fn apply_routed_codex_upstream_model(
+    app_type: &AppType,
+    model_routed: bool,
+    provider: &Provider,
+    body: &mut Value,
+) {
+    if model_routed && matches!(app_type, AppType::Codex) {
+        super::providers::apply_codex_upstream_model(provider, body);
+    }
+}
+
 fn codex_anthropic_error_envelope_message(body: &[u8]) -> Option<String> {
     let value: Value = serde_json::from_slice(body).ok()?;
     if value.get("type").and_then(Value::as_str) != Some("error") && value.get("error").is_none() {
@@ -3525,6 +3546,43 @@ mod tests {
         let routed = forwarder.with_model_routing(true);
         assert!(!routed.should_switch_current_provider("provider-b"));
         assert_eq!(routed.max_attempts, 1);
+    }
+
+    #[test]
+    fn model_routed_native_codex_request_uses_target_provider_model() {
+        let forwarder = test_forwarder(Duration::ZERO, Duration::ZERO).with_model_routing(true);
+        let mut provider = test_provider_with_type(None);
+        provider.settings_config = json!({
+            "model": "deepseek-v3.2",
+            "modelCatalog": { "models": [{ "model": "deepseek-v3.2" }] }
+        });
+        provider.meta = Some(crate::provider::ProviderMeta {
+            api_format: Some("openai_responses".to_string()),
+            ..Default::default()
+        });
+        let mut body = json!({ "model": "gpt-5.4", "input": "ping" });
+
+        assert!(
+            !crate::proxy::providers::should_convert_codex_responses_to_chat(
+                &provider,
+                "/responses"
+            )
+        );
+        assert!(
+            !crate::proxy::providers::should_convert_codex_responses_to_anthropic(
+                &provider,
+                "/responses"
+            )
+        );
+
+        apply_routed_codex_upstream_model(
+            &AppType::Codex,
+            forwarder.model_routed,
+            &provider,
+            &mut body,
+        );
+
+        assert_eq!(body["model"], "deepseek-v3.2");
     }
 
     #[test]

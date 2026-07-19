@@ -10,7 +10,9 @@ use crate::proxy::server::ProxyServer;
 use crate::proxy::switch_lock::SwitchLockManager;
 use crate::proxy::types::*;
 use crate::services::provider::{
-    build_effective_settings_with_common_config, write_live_with_common_config,
+    build_effective_settings_with_common_config, lock_codex_model_catalog_projection,
+    prepare_codex_live_config_text_with_optional_catalog_projection,
+    write_codex_provider_live_with_catalog_projection, write_live_with_common_config,
 };
 use serde_json::{json, Map, Value};
 use std::str::FromStr;
@@ -2483,6 +2485,7 @@ impl ProxyService {
             }
 
             if has_backup && !live_taken_over && matches!(app_type_enum, AppType::Codex) {
+                let _catalog_guard = lock_codex_model_catalog_projection();
                 let effective_settings = build_effective_settings_with_common_config(
                     self.db.as_ref(),
                     &AppType::Codex,
@@ -2493,10 +2496,14 @@ impl ProxyService {
                     .get("auth")
                     .ok_or_else(|| "Codex 供应商缺少 auth 配置".to_string())?;
                 let config_str = effective_settings.get("config").and_then(|v| v.as_str());
-                let profile =
-                    crate::proxy::providers::resolve_codex_catalog_tool_profile(&provider);
+                let mut effective_provider = provider.clone();
+                effective_provider.settings_config = effective_settings.clone();
+                let profile = crate::proxy::providers::resolve_codex_catalog_tool_profile(
+                    &effective_provider,
+                );
 
-                crate::codex_config::write_codex_provider_live_with_catalog(
+                write_codex_provider_live_with_catalog_projection(
+                    self.db.as_ref(),
                     &effective_settings,
                     provider.category.as_deref(),
                     auth,
@@ -2850,17 +2857,23 @@ impl ProxyService {
         let auth = config
             .get("auth")
             .ok_or_else(|| "Codex 配置缺少 auth 字段".to_string())?;
+        let _catalog_guard = lock_codex_model_catalog_projection();
         let config_str = config.get("config").and_then(|v| v.as_str());
-        let profile = crate::proxy::providers::resolve_codex_catalog_tool_profile(provider);
+        let mut effective_provider = provider.clone();
+        effective_provider.settings_config = config.clone();
+        let profile =
+            crate::proxy::providers::resolve_codex_catalog_tool_profile(&effective_provider);
 
-        crate::codex_config::write_codex_provider_live_with_catalog(
+        write_codex_provider_live_with_catalog_projection(
+            self.db.as_ref(),
             config,
             provider.category.as_deref(),
             auth,
             config_str,
             profile,
         )
-        .map_err(|e| format!("写入 Codex 配置失败: {e}"))
+        .map_err(|e| format!("写入 Codex 配置失败: {e}"))?;
+        Ok(())
     }
 
     fn codex_auth_has_proxy_placeholder(auth: &Value) -> bool {
@@ -2883,15 +2896,22 @@ impl ProxyService {
         // codex-official no placeholder is needed because requires_openai_auth
         // makes Codex supply its native authorization.
         if official_passthrough || placeholder_auth {
+            let _catalog_guard = lock_codex_model_catalog_projection();
             let config_str = config.get("config").and_then(|v| v.as_str()).unwrap_or("");
             let profile = provider
-                .map(crate::proxy::providers::resolve_codex_catalog_tool_profile)
+                .map(|provider| {
+                    let mut effective_provider = provider.clone();
+                    effective_provider.settings_config = config.clone();
+                    crate::proxy::providers::resolve_codex_catalog_tool_profile(&effective_provider)
+                })
                 .unwrap_or(crate::codex_config::CodexCatalogToolProfile::ProxyChat);
-            let prepared_config =
-                crate::codex_config::prepare_codex_live_config_text_with_optional_catalog(
-                    config, config_str, profile,
-                )
-                .map_err(|e| format!("写入 Codex 配置失败: {e}"))?;
+            let prepared_config = prepare_codex_live_config_text_with_optional_catalog_projection(
+                self.db.as_ref(),
+                config,
+                config_str,
+                profile,
+            )
+            .map_err(|e| format!("写入 Codex 配置失败: {e}"))?;
             let live_config = if official_passthrough {
                 prepared_config
             } else {
@@ -2912,6 +2932,7 @@ impl ProxyService {
     fn write_codex_live_verbatim(&self, config: &Value) -> Result<(), String> {
         use crate::codex_config::{get_codex_auth_path, get_codex_config_path};
 
+        let _catalog_guard = lock_codex_model_catalog_projection();
         let auth = config.get("auth");
         let config_str = config.get("config").and_then(|v| v.as_str());
 
@@ -2936,7 +2957,8 @@ impl ProxyService {
         // limitation (restore-of-deleted-provider-backup only).
         let prepared_cfg = config_str
             .map(|cfg| {
-                crate::codex_config::prepare_codex_live_config_text_with_optional_catalog(
+                prepare_codex_live_config_text_with_optional_catalog_projection(
+                    self.db.as_ref(),
                     config,
                     cfg,
                     crate::codex_config::CodexCatalogToolProfile::ProxyChat,
@@ -2971,6 +2993,28 @@ impl ProxyService {
                     .map_err(|e| format!("写入 Codex config 失败: {e}"))?;
             }
             (None, None) => {}
+        }
+
+        // A backup without a DB catalog owner is authoritative: snapshot
+        // backups may carry a user/legacy pointer, while provider-rebuilt
+        // backups may carry an inline catalog. Preserve the projection prepared
+        // above in both cases. Once routing was explicitly configured (including
+        // an explicitly cleared table), or a current provider exists, DB becomes
+        // authoritative and must re-project after the verbatim auth/base URL
+        // restore. The explicit-empty case prevents an old routed pointer from
+        // being resurrected when takeover is disabled.
+        let has_db_projection_authority = self
+            .db
+            .is_codex_model_provider_map_configured()
+            .map_err(|e| format!("读取 Codex 模型路由状态失败: {e}"))?
+            || crate::settings::get_effective_current_provider(self.db.as_ref(), &AppType::Codex)
+                .map_err(|e| format!("读取 Codex 当前供应商失败: {e}"))?
+                .is_some();
+        if has_db_projection_authority {
+            crate::services::provider::refresh_codex_model_catalog_projection_unlocked(
+                self.db.as_ref(),
+            )
+            .map_err(|e| format!("恢复 Codex Live 后刷新模型目录失败: {e}"))?;
         }
 
         Ok(())
@@ -6683,6 +6727,67 @@ requires_openai_auth = true
         assert!(
             restored.contains(pointer.as_str()),
             "restored pointer must still reference the cc-switch generated catalog file"
+        );
+        assert!(
+            !db.is_codex_model_provider_map_configured()
+                .expect("read route configured state"),
+            "this regression covers the no-DB-owner snapshot restore path"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&catalog_path).expect("read preserved catalog"),
+            r#"{"models":[{"slug":"deepseek-v4-flash"}]}"#
+        );
+    }
+
+    /// Regression: clearing the routing table during takeover must remain
+    /// cleared after takeover is disabled. An old backup can still contain the
+    /// previous route-owned pointer and web-search sentinel; the explicit empty
+    /// routing setting makes DB authoritative and removes both on restore.
+    #[tokio::test]
+    #[serial]
+    async fn codex_restore_does_not_resurrect_explicitly_cleared_routed_catalog() {
+        let _home = TempHome::new();
+        crate::settings::reload_settings().expect("reload settings");
+
+        let db = Arc::new(Database::memory().expect("init db"));
+        let service = ProxyService::new(db.clone());
+        db.set_codex_model_provider_map(&std::collections::BTreeMap::new())
+            .expect("save explicit empty route table");
+
+        let catalog_path = crate::codex_config::get_codex_model_catalog_path();
+        if let Some(parent) = catalog_path.parent() {
+            std::fs::create_dir_all(parent).expect("create codex dir");
+        }
+        std::fs::write(&catalog_path, r#"{"models":[{"slug":"stale-route"}]}"#)
+            .expect("seed stale route catalog");
+        let pointer = catalog_path.to_string_lossy().replace('\\', "/");
+        let backup_config = format!(
+            "model_provider = \"custom\"\n\
+             model_catalog_json = \"{pointer}\"\n\
+             web_search = \"disabled\"\n"
+        );
+        let backup_json = serde_json::to_string(&json!({
+            "auth": { "OPENAI_API_KEY": "provider-key" },
+            "config": backup_config,
+        }))
+        .expect("serialize backup");
+        db.save_live_backup("codex", &backup_json)
+            .await
+            .expect("seed live backup");
+
+        service
+            .restore_live_config_for_app_with_fallback(&AppType::Codex)
+            .await
+            .expect("restore codex live from backup");
+
+        let restored = std::fs::read_to_string(crate::codex_config::get_codex_config_path())
+            .expect("read restored config.toml");
+        let restored: toml::Value = toml::from_str(&restored).expect("parse restored config");
+        assert!(restored.get("model_catalog_json").is_none());
+        assert!(restored.get("web_search").is_none());
+        assert_eq!(
+            restored.get("model_provider").and_then(toml::Value::as_str),
+            Some("custom")
         );
     }
 

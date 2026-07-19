@@ -15,7 +15,7 @@ import { AutoFailoverConfigPanel } from "@/components/proxy/AutoFailoverConfigPa
 import { FailoverQueueManager } from "@/components/proxy/FailoverQueueManager";
 import { RectifierConfigPanel } from "@/components/settings/RectifierConfigPanel";
 import { GlobalProxySettings } from "@/components/settings/GlobalProxySettings";
-import { ClaudeModelProviderMappingPanel } from "@/components/settings/ClaudeModelProviderMappingPanel";
+import { ModelProviderMappingPanel } from "@/components/settings/ModelProviderMappingPanel";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { ToggleRow } from "@/components/ui/toggle-row";
 import { useProxyStatus } from "@/hooks/useProxyStatus";
@@ -24,6 +24,27 @@ import type { SettingsFormState } from "@/hooks/useSettings";
 interface ProxyTabContentProps {
   settings: SettingsFormState;
   onAutoSave: (updates: Partial<SettingsFormState>) => Promise<boolean | void>;
+}
+
+export function ModelProviderRoutingTabs() {
+  return (
+    <Tabs defaultValue="claude" className="w-full">
+      <TabsList className="grid w-full grid-cols-2">
+        <TabsTrigger value="claude">Claude</TabsTrigger>
+        <TabsTrigger value="codex">Codex</TabsTrigger>
+      </TabsList>
+      {(["claude", "codex"] as const).map((appType) => (
+        <TabsContent
+          key={appType}
+          value={appType}
+          forceMount
+          className="mt-4 data-[state=inactive]:hidden"
+        >
+          <ModelProviderMappingPanel appType={appType} />
+        </TabsContent>
+      ))}
+    </Tabs>
+  );
 }
 
 export function ProxyTabContent({
@@ -215,9 +236,9 @@ export function ProxyTabContent({
           </AccordionContent>
         </AccordionItem>
 
-        {/* Claude Model Provider Mapping */}
+        {/* Model Provider Mapping */}
         <AccordionItem
-          value="claudeModelProviderMapping"
+          value="modelProviderMapping"
           className="rounded-xl glass-card overflow-hidden"
         >
           <AccordionTrigger className="px-6 py-4 hover:no-underline hover:bg-muted/50 data-[state=open]:bg-muted/50">
@@ -234,7 +255,7 @@ export function ProxyTabContent({
             </div>
           </AccordionTrigger>
           <AccordionContent className="px-6 pb-6 pt-4 border-t border-border/50">
-            <ClaudeModelProviderMappingPanel />
+            <ModelProviderRoutingTabs />
           </AccordionContent>
         </AccordionItem>
 

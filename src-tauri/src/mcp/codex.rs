@@ -285,6 +285,7 @@ pub fn sync_enabled_to_codex(config: &MultiAppConfig) -> Result<(), AppError> {
     if !should_sync_codex_mcp() {
         return Ok(());
     }
+    let _config_guard = crate::services::provider::lock_codex_model_catalog_projection();
     use toml_edit::{Item, Table};
 
     // 1) 收集启用项（Codex 维度）
@@ -354,6 +355,7 @@ pub fn sync_single_server_to_codex(
     if !should_sync_codex_mcp() {
         return Ok(());
     }
+    let _config_guard = crate::services::provider::lock_codex_model_catalog_projection();
     use toml_edit::Item;
 
     // 读取现有的 config.toml
@@ -405,6 +407,7 @@ pub fn remove_server_from_codex(id: &str) -> Result<(), AppError> {
     if !should_sync_codex_mcp() {
         return Ok(());
     }
+    let _config_guard = crate::services::provider::lock_codex_model_catalog_projection();
     let config_path = crate::codex_config::get_codex_config_path();
 
     if !config_path.exists() {

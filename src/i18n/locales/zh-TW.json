@@ -352,8 +352,8 @@
         "description": "設定故障轉移佇列和斷路器策略"
       },
       "modelProviderMapping": {
-        "title": "Claude 模型路由",
-        "description": "將精確的 Claude 模型 ID 路由至指定供應商"
+        "title": "模型路由",
+        "description": "將精確的 Claude 和 Codex 模型 ID 路由至指定供應商"
       },
       "pricing": {
         "title": "成本定價",
@@ -2455,20 +2455,26 @@
   },
   "proxy": {
     "modelProviderMapping": {
-      "description": "路由表非空時，Claude 請求必須精確符合已設定的模型 ID。符合後只使用指定供應商；未符合時會在本地直接報錯，不會向任何上游傳送請求。",
-      "modelId": "Claude 模型 ID",
-      "modelPlaceholder": "例如：deepseek-v3.1",
+      "description": {
+        "claude": "留空時會繼續使用正常的供應商選擇與故障轉移。只要設定任一路由，此表就會成為嚴格的精確比對允許清單：符合後僅使用指定供應商且不進行故障轉移，未符合時會在本地直接失敗；不支援路由至 Claude 官方供應商。",
+        "codex": "留空時會繼續使用正常的供應商選擇與故障轉移。只要設定任一路由，此表就會成為嚴格的精確比對允許清單：符合後僅使用指定供應商且不進行故障轉移，未符合時會在本地直接失敗。路由會沿用目前 Codex 供應商的模型目錄與用戶端設定（不會合併目錄），請只選擇相容的第三方供應商，並在切換模型後建立新工作階段；不支援 OpenAI 官方供應商。"
+      },
+      "modelId": "{{app}} 模型 ID",
+      "modelPlaceholder": {
+        "claude": "例如：claude-sonnet-4-5",
+        "codex": "例如：gpt-5.3-codex"
+      },
       "provider": "供應商",
       "providerPlaceholder": "選擇供應商",
       "add": "新增映射",
       "empty": "尚未設定模型路由，將繼續使用現有供應商選擇邏輯。",
-      "saved": "Claude 模型路由已儲存",
-      "saveFailed": "儲存 Claude 模型路由失敗：{{error}}",
+      "saved": "{{app}} 模型路由已儲存",
+      "saveFailed": "儲存 {{app}} 模型路由失敗：{{error}}",
       "incomplete": "儲存前請填寫每一列的模型 ID 和供應商。",
       "duplicateModel": "相同模型 ID 只能設定一次。",
       "missingProvider": "供應商不存在（{{id}}）",
-      "loadFailed": "載入 Claude 模型路由失敗，現有路由未被變更。",
-      "providerLoadFailed": "載入 Claude 供應商失敗，現有路由未被變更。"
+      "loadFailed": "載入 {{app}} 模型路由失敗，現有路由未被變更。",
+      "providerLoadFailed": "載入 {{app}} 供應商失敗，現有路由未被變更。"
     },
     "panel": {
       "serviceAddress": "服務位址",

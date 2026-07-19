@@ -10,6 +10,7 @@ use std::collections::BTreeMap;
 impl Database {
     const LEGACY_COMMON_CONFIG_MIGRATED_KEY: &'static str = "common_config_legacy_migrated_v1";
     const CLAUDE_MODEL_PROVIDER_MAP_KEY: &'static str = "claude_model_provider_map";
+    const CODEX_MODEL_PROVIDER_MAP_KEY: &'static str = "codex_model_provider_map";
 
     fn config_snippet_cleared_key(app_type: &str) -> String {
         format!("common_config_{app_type}_cleared")
@@ -75,6 +76,49 @@ impl Database {
         let json = serde_json::to_string(mappings)
             .map_err(|e| AppError::Database(format!("序列化 Claude 模型路由配置失败: {e}")))?;
         self.set_setting(Self::CLAUDE_MODEL_PROVIDER_MAP_KEY, &json)
+    }
+
+    /// 获取 Codex 模型到供应商的精确路由表。
+    pub fn get_codex_model_provider_map(&self) -> Result<BTreeMap<String, String>, AppError> {
+        match self.get_setting(Self::CODEX_MODEL_PROVIDER_MAP_KEY)? {
+            Some(json) => serde_json::from_str(&json)
+                .map_err(|e| AppError::Database(format!("解析 Codex 模型路由配置失败: {e}"))),
+            None => Ok(BTreeMap::new()),
+        }
+    }
+
+    /// Whether the Codex routing table has ever been explicitly saved.
+    ///
+    /// This distinguishes "never configured" from an explicitly saved empty
+    /// table. Restore needs that distinction: the former must preserve a
+    /// standalone backup catalog, while the latter must not resurrect a stale
+    /// route-owned catalog after proxy takeover ends.
+    pub fn is_codex_model_provider_map_configured(&self) -> Result<bool, AppError> {
+        Ok(self
+            .get_setting(Self::CODEX_MODEL_PROVIDER_MAP_KEY)?
+            .is_some())
+    }
+
+    /// 更新 Codex 模型到供应商的精确路由表。
+    pub fn set_codex_model_provider_map(
+        &self,
+        mappings: &BTreeMap<String, String>,
+    ) -> Result<(), AppError> {
+        let json = serde_json::to_string(mappings)
+            .map_err(|e| AppError::Database(format!("序列化 Codex 模型路由配置失败: {e}")))?;
+        self.set_setting(Self::CODEX_MODEL_PROVIDER_MAP_KEY, &json)
+    }
+
+    /// Remove the Codex routing setting entirely, restoring the
+    /// "never configured" state. Used only for transactional rollback.
+    pub fn clear_codex_model_provider_map_setting(&self) -> Result<(), AppError> {
+        let conn = lock_conn!(self.conn);
+        conn.execute(
+            "DELETE FROM settings WHERE key = ?1",
+            params![Self::CODEX_MODEL_PROVIDER_MAP_KEY],
+        )
+        .map_err(|e| AppError::Database(e.to_string()))?;
+        Ok(())
     }
 
     // --- 通用配置片段 (Common Config Snippet) ---
@@ -381,6 +425,87 @@ mod tests {
                 .expect("read raw setting")
                 .as_deref(),
             Some(r#"{"deepseek-v3.1":"provider-a","mimo-v2":"provider-b"}"#)
+        );
+    }
+
+    #[test]
+    fn codex_model_provider_map_defaults_to_empty() {
+        let db = Database::memory().expect("memory database");
+
+        assert!(db
+            .get_codex_model_provider_map()
+            .expect("read default mappings")
+            .is_empty());
+        assert!(!db
+            .is_codex_model_provider_map_configured()
+            .expect("read default configured state"));
+    }
+
+    #[test]
+    fn codex_model_provider_map_round_trips_in_stable_order() {
+        let db = Database::memory().expect("memory database");
+        let mappings = BTreeMap::from([
+            ("gpt-5.4".to_string(), "provider-b".to_string()),
+            ("gpt-5.3-codex".to_string(), "provider-a".to_string()),
+        ]);
+
+        db.set_codex_model_provider_map(&mappings)
+            .expect("save mappings");
+
+        assert_eq!(
+            db.get_codex_model_provider_map().expect("read mappings"),
+            mappings
+        );
+        assert_eq!(
+            db.get_setting(Database::CODEX_MODEL_PROVIDER_MAP_KEY)
+                .expect("read raw setting")
+                .as_deref(),
+            Some(r#"{"gpt-5.3-codex":"provider-a","gpt-5.4":"provider-b"}"#)
+        );
+        assert!(db
+            .is_codex_model_provider_map_configured()
+            .expect("read configured state"));
+    }
+
+    #[test]
+    fn explicit_empty_codex_model_provider_map_is_distinct_from_missing() {
+        let db = Database::memory().expect("memory database");
+
+        db.set_codex_model_provider_map(&BTreeMap::new())
+            .expect("save explicit empty mappings");
+        assert!(db
+            .is_codex_model_provider_map_configured()
+            .expect("read configured state"));
+
+        db.clear_codex_model_provider_map_setting()
+            .expect("clear routing setting");
+        assert!(!db
+            .is_codex_model_provider_map_configured()
+            .expect("read cleared configured state"));
+    }
+
+    #[test]
+    fn claude_and_codex_model_provider_maps_are_isolated() {
+        let db = Database::memory().expect("memory database");
+        let claude_mappings =
+            BTreeMap::from([("claude-opus-4-6".to_string(), "claude-provider".to_string())]);
+        let codex_mappings =
+            BTreeMap::from([("gpt-5.4".to_string(), "codex-provider".to_string())]);
+
+        db.set_claude_model_provider_map(&claude_mappings)
+            .expect("save Claude mappings");
+        db.set_codex_model_provider_map(&codex_mappings)
+            .expect("save Codex mappings");
+
+        assert_eq!(
+            db.get_claude_model_provider_map()
+                .expect("read Claude mappings"),
+            claude_mappings
+        );
+        assert_eq!(
+            db.get_codex_model_provider_map()
+                .expect("read Codex mappings"),
+            codex_mappings
         );
     }
 }

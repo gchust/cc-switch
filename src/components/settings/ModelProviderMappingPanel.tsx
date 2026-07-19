@@ -11,18 +11,33 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import {
-  useClaudeModelProviderMap,
-  useUpdateClaudeModelProviderMap,
+  useModelProviderMap,
+  useUpdateModelProviderMap,
 } from "@/lib/query/proxy";
 import { useProvidersQuery } from "@/lib/query/queries";
-import type { ClaudeModelProviderMap } from "@/lib/api/settings";
+import type {
+  ModelProviderMap,
+  ModelProviderRoutingApp,
+} from "@/lib/api/settings";
+import { CODEX_OFFICIAL_PROVIDER_ID } from "@/utils/providerCapabilities";
 import { generateUUID } from "@/utils/uuid";
+
+interface ModelProviderMappingPanelProps {
+  appType: ModelProviderRoutingApp;
+}
 
 interface MappingRow {
   rowId: string;
   modelId: string;
   providerId: string;
 }
+
+const BUILT_IN_OFFICIAL_PROVIDER_IDS = new Set([
+  "claude-official",
+  "claude-desktop-official",
+  CODEX_OFFICIAL_PROVIDER_ID,
+  "gemini-official",
+]);
 
 function createRow(modelId = "", providerId = ""): MappingRow {
   return {
@@ -32,23 +47,23 @@ function createRow(modelId = "", providerId = ""): MappingRow {
   };
 }
 
-function mapToRows(mappings: ClaudeModelProviderMap): MappingRow[] {
+function mapToRows(mappings: ModelProviderMap): MappingRow[] {
   return Object.entries(mappings).map(([modelId, providerId]) =>
     createRow(modelId, providerId),
   );
 }
 
-function rowsToMap(rows: MappingRow[]): ClaudeModelProviderMap {
+function rowsToMap(rows: MappingRow[]): ModelProviderMap {
   return Object.fromEntries(
     rows.map((row) => [row.modelId.trim(), row.providerId]),
   );
 }
 
 function mappingsEqual(
-  left: ClaudeModelProviderMap,
-  right: ClaudeModelProviderMap,
+  left: ModelProviderMap,
+  right: ModelProviderMap,
 ): boolean {
-  const sortedEntries = (mappings: ClaudeModelProviderMap) =>
+  const sortedEntries = (mappings: ModelProviderMap) =>
     Object.entries(mappings).sort(([leftModel], [rightModel]) =>
       leftModel.localeCompare(rightModel),
     );
@@ -58,29 +73,33 @@ function mappingsEqual(
   );
 }
 
-export function ClaudeModelProviderMappingPanel() {
+export function ModelProviderMappingPanel({
+  appType,
+}: ModelProviderMappingPanelProps) {
   const { t } = useTranslation();
+  const appName = appType === "claude" ? "Claude" : "Codex";
   const {
     data: mappings,
     isLoading: isMappingsLoading,
     isError: isMappingsError,
     refetch: refetchMappings,
-  } = useClaudeModelProviderMap();
+  } = useModelProviderMap(appType);
   const {
     data: providerData,
     isLoading: isProvidersLoading,
     isError: isProvidersError,
     refetch: refetchProviders,
-  } = useProvidersQuery("claude");
-  const updateMappings = useUpdateClaudeModelProviderMap();
+  } = useProvidersQuery(appType);
+  const updateMappings = useUpdateModelProviderMap(appType);
   const [rows, setRows] = useState<MappingRow[]>([]);
-  const [baselineMappings, setBaselineMappings] =
-    useState<ClaudeModelProviderMap>();
+  const [baselineMappings, setBaselineMappings] = useState<ModelProviderMap>();
 
   const providers = useMemo(
     () =>
       Object.values(providerData?.providers ?? {}).filter(
-        (provider) => provider.category !== "official",
+        (provider) =>
+          provider.category !== "official" &&
+          !BUILT_IN_OFFICIAL_PROVIDER_IDS.has(provider.id),
       ),
     [providerData?.providers],
   );
@@ -104,13 +123,8 @@ export function ClaudeModelProviderMappingPanel() {
       mappingsEqual(currentMappings, baselineMappings)
     ) {
       setRows(mapToRows(mappings));
-      setBaselineMappings(mappings);
-      return;
     }
-
-    if (mappingsEqual(currentMappings, mappings)) {
-      setBaselineMappings(mappings);
-    }
+    setBaselineMappings(mappings);
   }, [mappings]);
 
   const validationError = useMemo(() => {
@@ -140,8 +154,8 @@ export function ClaudeModelProviderMappingPanel() {
     );
   };
 
-  const handleSave = async () => {
-    await updateMappings.mutateAsync(normalizedMappings);
+  const handleSave = () => {
+    void updateMappings.mutateAsync(normalizedMappings).catch(() => undefined);
   };
 
   if (
@@ -168,6 +182,7 @@ export function ClaudeModelProviderMappingPanel() {
               mappingsUnavailable
                 ? "proxy.modelProviderMapping.loadFailed"
                 : "proxy.modelProviderMapping.providerLoadFailed",
+              { app: appName },
             )}
           </span>
         </div>
@@ -194,7 +209,7 @@ export function ClaudeModelProviderMappingPanel() {
     <div className="space-y-4">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <p className="text-sm text-muted-foreground">
-          {t("proxy.modelProviderMapping.description")}
+          {t(`proxy.modelProviderMapping.description.${appType}`)}
         </p>
         <Button
           type="button"
@@ -217,7 +232,9 @@ export function ClaudeModelProviderMappingPanel() {
       ) : (
         <div className="space-y-2">
           <div className="hidden grid-cols-[1fr_1fr_36px] gap-2 px-1 text-xs font-medium text-muted-foreground md:grid">
-            <span>{t("proxy.modelProviderMapping.modelId")}</span>
+            <span>
+              {t("proxy.modelProviderMapping.modelId", { app: appName })}
+            </span>
             <span>{t("proxy.modelProviderMapping.provider")}</span>
             <span />
           </div>
@@ -233,9 +250,13 @@ export function ClaudeModelProviderMappingPanel() {
                 <Input
                   value={row.modelId}
                   disabled={updateMappings.isPending}
-                  placeholder={t("proxy.modelProviderMapping.modelPlaceholder")}
+                  placeholder={t(
+                    `proxy.modelProviderMapping.modelPlaceholder.${appType}`,
+                  )}
                   className="font-mono"
-                  aria-label={`${t("proxy.modelProviderMapping.modelId")} ${index + 1}`}
+                  aria-label={`${t("proxy.modelProviderMapping.modelId", {
+                    app: appName,
+                  })} ${index + 1}`}
                   onChange={(event) =>
                     updateRow(row.rowId, { modelId: event.target.value })
                   }
@@ -298,7 +319,10 @@ export function ClaudeModelProviderMappingPanel() {
       )}
 
       {validationError && rows.length > 0 && (
-        <div className="flex items-start gap-2 rounded-lg border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
+        <div
+          role="alert"
+          className="flex items-start gap-2 rounded-lg border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive"
+        >
           <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
           <span>{validationError}</span>
         </div>

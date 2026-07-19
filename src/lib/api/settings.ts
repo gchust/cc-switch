@@ -30,6 +30,23 @@ export interface WebDavSyncResult {
   status: string;
 }
 
+export type ModelProviderRoutingApp = "claude" | "codex";
+export type ModelProviderMap = Record<string, string>;
+
+const MODEL_PROVIDER_MAP_COMMANDS = {
+  claude: {
+    get: "get_claude_model_provider_map",
+    set: "set_claude_model_provider_map",
+  },
+  codex: {
+    get: "get_codex_model_provider_map",
+    set: "set_codex_model_provider_map",
+  },
+} as const satisfies Record<
+  ModelProviderRoutingApp,
+  { get: string; set: string }
+>;
+
 export const settingsApi = {
   async get(): Promise<Settings> {
     return await invoke("get_settings");
@@ -276,14 +293,17 @@ export const settingsApi = {
     return await invoke("probe_tool_installations", { tools });
   },
 
-  async getClaudeModelProviderMap(): Promise<ClaudeModelProviderMap> {
-    return await invoke("get_claude_model_provider_map");
+  async getModelProviderMap(
+    appType: ModelProviderRoutingApp,
+  ): Promise<ModelProviderMap> {
+    return await invoke(MODEL_PROVIDER_MAP_COMMANDS[appType].get);
   },
 
-  async setClaudeModelProviderMap(
-    mappings: ClaudeModelProviderMap,
+  async setModelProviderMap(
+    appType: ModelProviderRoutingApp,
+    mappings: ModelProviderMap,
   ): Promise<boolean> {
-    return await invoke("set_claude_model_provider_map", { mappings });
+    return await invoke(MODEL_PROVIDER_MAP_COMMANDS[appType].set, { mappings });
   },
 
   async getRectifierConfig(): Promise<RectifierConfig> {
@@ -330,8 +350,6 @@ export interface ToolInstallationReport {
   command: string;
   anchored: boolean;
 }
-
-export type ClaudeModelProviderMap = Record<string, string>;
 
 export interface RectifierConfig {
   enabled: boolean;

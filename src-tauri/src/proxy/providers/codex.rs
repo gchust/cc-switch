@@ -256,6 +256,15 @@ pub fn codex_provider_upstream_model(provider: &Provider) -> Option<String> {
                         .or_else(|| extract_codex_model_from_toml(config))
                 })
         })
+        .or_else(|| {
+            provider
+                .settings_config
+                .pointer("/modelCatalog/models/0/model")
+                .and_then(JsonValue::as_str)
+                .map(str::trim)
+                .filter(|model| !model.is_empty())
+                .map(ToString::to_string)
+        })
 }
 
 fn codex_provider_catalog_model_ids(provider: &Provider) -> HashSet<String> {
@@ -1162,6 +1171,28 @@ wire_api = "anthropic"
         assert_eq!(
             body.get("model").and_then(|v| v.as_str()),
             Some("claude-opus-4-1[1m]")
+        );
+    }
+
+    #[test]
+    fn test_apply_codex_upstream_model_uses_first_catalog_model_for_route_alias() {
+        let provider = create_provider(json!({
+            "modelCatalog": {
+                "models": [
+                    { "model": "provider-default" },
+                    { "model": "provider-secondary" }
+                ]
+            }
+        }));
+        let mut body = json!({ "model": "route-alias", "input": "hi" });
+
+        let result = apply_codex_upstream_model(&provider, &mut body);
+
+        assert_eq!(result.as_deref(), Some("provider-default"));
+        assert_eq!(
+            body.get("model").and_then(JsonValue::as_str),
+            Some("provider-default"),
+            "an alias catalog row and request forwarding must share the same fallback model"
         );
     }
 
