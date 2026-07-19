@@ -31,9 +31,12 @@ pub use live::{
 // Internal re-exports (pub(crate))
 pub(crate) use live::sanitize_claude_settings_for_live;
 pub(crate) use live::{
-    build_effective_settings_with_common_config, normalize_provider_common_config_for_storage,
-    provider_exists_in_live_config, strip_common_config_from_live_settings,
-    sync_current_provider_for_app_to_live, write_live_with_common_config,
+    build_effective_settings_with_common_config, lock_codex_model_catalog_projection,
+    normalize_provider_common_config_for_storage,
+    prepare_codex_live_config_text_with_optional_catalog_projection,
+    provider_exists_in_live_config, refresh_codex_model_catalog_projection_unlocked,
+    strip_common_config_from_live_settings, sync_current_provider_for_app_to_live,
+    write_codex_provider_live_with_catalog_projection, write_live_with_common_config,
 };
 
 // Internal re-exports
@@ -2527,71 +2530,150 @@ impl ProviderService {
         let effective_current =
             crate::settings::get_effective_current_provider(&state.db, &app_type)?;
         let is_current = effective_current.as_deref() == Some(provider.id.as_str());
+        let is_routed_codex_target = if matches!(app_type, AppType::Codex) {
+            state
+                .db
+                .get_codex_model_provider_map()?
+                .values()
+                .any(|provider_id| provider_id == &provider.id)
+        } else {
+            false
+        };
 
         if is_current {
-            // 如果 Claude 代理接管处于激活状态，并且代理服务正在运行：
-            // - 不直接走普通 Live 写入逻辑
-            // - 改为更新 Live 备份，并在 Claude 下同步代理安全的 Live 配置
-            let has_live_backup =
-                futures::executor::block_on(state.db.get_live_backup(app_type.as_str()))
-                    .ok()
-                    .flatten()
-                    .is_some();
-            let live_taken_over = state
-                .proxy_service
-                .detect_takeover_in_live_config_for_app(&app_type);
-            // Backup or live placeholders mean the live file is currently owned
-            // by proxy takeover, including the short activation window before
-            // proxy_config.enabled is committed.
-            let should_sync_via_proxy = has_live_backup || live_taken_over;
+            let sync_current_provider = |provider: &Provider| -> Result<(), AppError> {
+                // 如果 Claude 代理接管处于激活状态，并且代理服务正在运行：
+                // - 不直接走普通 Live 写入逻辑
+                // - 改为更新 Live 备份，并在 Claude 下同步代理安全的 Live 配置
+                let has_live_backup =
+                    futures::executor::block_on(state.db.get_live_backup(app_type.as_str()))
+                        .ok()
+                        .flatten()
+                        .is_some();
+                let live_taken_over = state
+                    .proxy_service
+                    .detect_takeover_in_live_config_for_app(&app_type);
+                // Backup or live placeholders mean the live file is currently owned
+                // by proxy takeover, including the short activation window before
+                // proxy_config.enabled is committed.
+                let should_sync_via_proxy = has_live_backup || live_taken_over;
 
-            if should_sync_via_proxy {
-                if matches!(app_type, AppType::ClaudeDesktop) {
-                    write_live_with_common_config(state.db.as_ref(), &app_type, &provider)?;
+                if should_sync_via_proxy {
+                    if matches!(app_type, AppType::ClaudeDesktop) {
+                        write_live_with_common_config(state.db.as_ref(), &app_type, provider)?;
+                    } else {
+                        futures::executor::block_on(
+                            state
+                                .proxy_service
+                                .update_live_backup_from_provider(app_type.as_str(), provider),
+                        )
+                        .map_err(|e| AppError::Message(format!("更新 Live 备份失败: {e}")))?;
+                    }
+
+                    if futures::executor::block_on(state.proxy_service.is_running()) {
+                        if matches!(app_type, AppType::Claude) {
+                            futures::executor::block_on(
+                                state
+                                    .proxy_service
+                                    .sync_claude_live_from_provider_while_proxy_active(provider),
+                            )
+                            .map_err(|e| {
+                                AppError::Message(format!("同步 Claude Live 配置失败: {e}"))
+                            })?;
+                        } else if live_taken_over && matches!(app_type, AppType::Codex) {
+                            // Codex model mappings are projected into a generated
+                            // model_catalog_json file. Refresh takeover-owned Live
+                            // immediately so adding/removing mappings cannot leave
+                            // the previous catalog pointer and capabilities active.
+                            futures::executor::block_on(
+                                state
+                                    .proxy_service
+                                    .sync_codex_live_from_provider_while_proxy_active(provider),
+                            )
+                            .map_err(|e| {
+                                AppError::Message(format!("同步 Codex Live 配置失败: {e}"))
+                            })?;
+                        }
+                    }
                 } else {
-                    futures::executor::block_on(
-                        state
-                            .proxy_service
-                            .update_live_backup_from_provider(app_type.as_str(), &provider),
-                    )
-                    .map_err(|e| AppError::Message(format!("更新 Live 备份失败: {e}")))?;
-                }
-
-                if futures::executor::block_on(state.proxy_service.is_running()) {
-                    if matches!(app_type, AppType::Claude) {
-                        futures::executor::block_on(
-                            state
-                                .proxy_service
-                                .sync_claude_live_from_provider_while_proxy_active(&provider),
-                        )
-                        .map_err(|e| {
-                            AppError::Message(format!("同步 Claude Live 配置失败: {e}"))
-                        })?;
-                    } else if live_taken_over && matches!(app_type, AppType::Codex) {
-                        // Codex model mappings are projected into a generated
-                        // model_catalog_json file. Refresh takeover-owned Live
-                        // immediately so adding/removing mappings cannot leave
-                        // the previous catalog pointer and capabilities active.
-                        futures::executor::block_on(
-                            state
-                                .proxy_service
-                                .sync_codex_live_from_provider_while_proxy_active(&provider),
-                        )
-                        .map_err(|e| AppError::Message(format!("同步 Codex Live 配置失败: {e}")))?;
+                    write_live_with_common_config(state.db.as_ref(), &app_type, provider)?;
+                    // 重写 live 后只重投影本应用的 MCP：全量 sync_all_enabled 会把
+                    // 无关应用的 live 损坏（如 ~/.claude.json 坏 JSON）牵连进保存
+                    // 流程。走到这里 DB 与 live 都已按新配置落盘，保存事实上已
+                    // 成功；投影失败降级为警告，避免制造"保存失败"假象（MCP
+                    // 投影可自愈：下次切换 / 任一 MCP 启停都会重新投影）。
+                    if let Err(err) = McpService::sync_enabled_for_app(state, &app_type) {
+                        log::warn!(
+                            "保存供应商后重投影 {app_type:?} MCP 失败（将在下次同步时自愈）: {err}"
+                        );
                     }
                 }
-            } else {
-                write_live_with_common_config(state.db.as_ref(), &app_type, &provider)?;
-                // 重写 live 后只重投影本应用的 MCP：全量 sync_all_enabled 会把
-                // 无关应用的 live 损坏（如 ~/.claude.json 坏 JSON）牵连进保存
-                // 流程。走到这里 DB 与 live 都已按新配置落盘，保存事实上已
-                // 成功；投影失败降级为警告，避免制造"保存失败"假象（MCP
-                // 投影可自愈：下次切换 / 任一 MCP 启停都会重新投影）。
-                if let Err(err) = McpService::sync_enabled_for_app(state, &app_type) {
-                    log::warn!(
-                        "保存供应商后重投影 {app_type:?} MCP 失败（将在下次同步时自愈）: {err}"
-                    );
+                Ok(())
+            };
+
+            if let Err(err) = sync_current_provider(&provider) {
+                if !is_routed_codex_target {
+                    return Err(err);
                 }
+
+                let rollback_db = existing_provider.as_ref().map_or_else(
+                    || state.db.delete_provider(app_type.as_str(), &provider.id),
+                    |previous_provider| {
+                        state.db.save_provider(app_type.as_str(), previous_provider)
+                    },
+                );
+                let rollback_live = if rollback_db.is_ok() {
+                    match existing_provider.as_ref() {
+                        Some(previous_provider) => sync_current_provider(previous_provider),
+                        None => {
+                            let _catalog_guard = lock_codex_model_catalog_projection();
+                            refresh_codex_model_catalog_projection_unlocked(state.db.as_ref())
+                                .map(|_| ())
+                        }
+                    }
+                } else {
+                    Ok(())
+                };
+                return Err(match (rollback_db, rollback_live) {
+                    (Ok(()), Ok(())) => AppError::Message(format!(
+                        "更新当前 Codex 路由供应商失败，数据库与 Live 已回滚: {err}"
+                    )),
+                    (Err(rollback_err), _) => AppError::Message(format!(
+                        "更新当前 Codex 路由供应商失败: {err}; 数据库回滚也失败: {rollback_err}"
+                    )),
+                    (Ok(()), Err(rollback_err)) => AppError::Message(format!(
+                        "更新当前 Codex 路由供应商失败: {err}; 数据库已回滚，但恢复 Live 失败: {rollback_err}"
+                    )),
+                });
+            }
+        } else if is_routed_codex_target {
+            // A route-owned catalog is independent of the current provider.
+            // Editing any referenced target must therefore refresh the merged
+            // projection even when that target is not currently selected.
+            let _catalog_guard = lock_codex_model_catalog_projection();
+            if let Err(err) = refresh_codex_model_catalog_projection_unlocked(state.db.as_ref()) {
+                let rollback_db = existing_provider.as_ref().map_or_else(
+                    || state.db.delete_provider(app_type.as_str(), &provider.id),
+                    |previous_provider| {
+                        state.db.save_provider(app_type.as_str(), previous_provider)
+                    },
+                );
+                let rollback_projection = if rollback_db.is_ok() {
+                    refresh_codex_model_catalog_projection_unlocked(state.db.as_ref()).map(|_| ())
+                } else {
+                    Ok(())
+                };
+                return Err(match (rollback_db, rollback_projection) {
+                    (Ok(()), Ok(())) => AppError::Message(format!(
+                        "刷新 Codex 合并模型目录失败，供应商更新已回滚: {err}"
+                    )),
+                    (Err(rollback_err), _) => AppError::Message(format!(
+                        "刷新 Codex 合并模型目录失败: {err}; 供应商回滚也失败: {rollback_err}"
+                    )),
+                    (Ok(()), Err(rollback_err)) => AppError::Message(format!(
+                        "刷新 Codex 合并模型目录失败: {err}; 供应商已回滚，但恢复原目录失败: {rollback_err}"
+                    )),
+                });
             }
         }
 
@@ -2695,6 +2777,8 @@ impl ProviderService {
 
         // Claude/Codex 模型路由保存的是应用内 provider ID；所有应用还需要同时
         // 检查本地 settings 与数据库的当前供应商，避免删除仍在使用的配置。
+        let _codex_route_guard =
+            matches!(app_type, AppType::Codex).then(lock_codex_model_catalog_projection);
         Self::ensure_provider_deletable(state, &app_type, id)?;
 
         state.db.delete_provider(app_type.as_str(), id)
@@ -4188,6 +4272,7 @@ impl ProviderService {
 
     /// 删除统一供应商
     pub fn delete_universal(state: &AppState, id: &str) -> Result<bool, AppError> {
+        let _codex_route_guard = lock_codex_model_catalog_projection();
         let Some(provider) = state.db.get_universal_provider(id)? else {
             return Ok(false);
         };
@@ -4228,6 +4313,7 @@ impl ProviderService {
 
     /// 同步统一供应商到各应用
     pub fn sync_universal_to_apps(state: &AppState, id: &str) -> Result<bool, AppError> {
+        let _codex_route_guard = lock_codex_model_catalog_projection();
         let provider = state
             .db
             .get_universal_provider(id)?
@@ -4239,6 +4325,12 @@ impl ProviderService {
         let claude_provider = provider.to_claude_provider();
         let codex_provider = provider.to_codex_provider();
         let gemini_provider = provider.to_gemini_provider();
+        let refresh_routed_codex_catalog = codex_provider.is_some()
+            && state
+                .db
+                .get_codex_model_provider_map()?
+                .values()
+                .any(|provider_id| provider_id == &codex_id);
 
         // 在首次写入前完成三个应用的碰撞与删除检查，失败时不产生部分同步。
         let claude_existing = Self::preflight_universal_child(
@@ -4255,6 +4347,7 @@ impl ProviderService {
             &codex_id,
             codex_provider.is_none(),
         )?;
+        let codex_previous = codex_existing.clone();
         let gemini_existing = Self::preflight_universal_child(
             state,
             &provider,
@@ -4294,6 +4387,31 @@ impl ProviderService {
             state.db.save_provider("gemini", &gemini_provider)?;
         } else if gemini_existing.is_some() {
             state.db.delete_provider("gemini", &gemini_id)?;
+        }
+
+        if refresh_routed_codex_catalog {
+            if let Err(err) = refresh_codex_model_catalog_projection_unlocked(state.db.as_ref()) {
+                let rollback_db = codex_previous.as_ref().map_or_else(
+                    || state.db.delete_provider("codex", &codex_id),
+                    |previous_provider| state.db.save_provider("codex", previous_provider),
+                );
+                let rollback_projection = if rollback_db.is_ok() {
+                    refresh_codex_model_catalog_projection_unlocked(state.db.as_ref()).map(|_| ())
+                } else {
+                    Ok(())
+                };
+                return Err(match (rollback_db, rollback_projection) {
+                    (Ok(()), Ok(())) => AppError::Message(format!(
+                        "刷新 Codex 合并模型目录失败，统一供应商的 Codex 子项已回滚: {err}"
+                    )),
+                    (Err(rollback_err), _) => AppError::Message(format!(
+                        "刷新 Codex 合并模型目录失败: {err}; Codex 子项回滚也失败: {rollback_err}"
+                    )),
+                    (Ok(()), Err(rollback_err)) => AppError::Message(format!(
+                        "刷新 Codex 合并模型目录失败: {err}; Codex 子项已回滚，但恢复原目录失败: {rollback_err}"
+                    )),
+                });
+            }
         }
 
         Ok(true)

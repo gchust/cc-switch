@@ -76,6 +76,14 @@ fn codex_top_level_model(config_text: &str) -> Option<String> {
 /// `web_search` hosted tool — by `base_url` host OR by the active model's brand
 /// (so an aggregator fronting a reject vendor's model is caught too). Driven by
 /// the live `config.toml`, so it applies to existing providers without a re-save.
+fn codex_model_rejects_web_search(model: &str) -> bool {
+    let model = model.trim().to_ascii_lowercase();
+    let model = model.rsplit('/').next().unwrap_or(model.as_str());
+    CODEX_WEB_SEARCH_REJECT_MODEL_PREFIXES
+        .iter()
+        .any(|prefix| model.starts_with(prefix))
+}
+
 fn codex_native_gateway_rejects_web_search(config_text: &str) -> bool {
     if let Some(base_url) = extract_codex_base_url(config_text) {
         let base_url = base_url.to_ascii_lowercase();
@@ -87,18 +95,27 @@ fn codex_native_gateway_rejects_web_search(config_text: &str) -> bool {
         }
     }
     if let Some(model) = codex_top_level_model(config_text) {
-        let model = model.to_ascii_lowercase();
         // Strip any aggregator "vendor/" prefix, e.g. "MiniMaxAI/MiniMax-M3"
         // or "qwen/qwen3-coder-plus".
-        let model = model.rsplit('/').next().unwrap_or(model.as_str());
-        if CODEX_WEB_SEARCH_REJECT_MODEL_PREFIXES
-            .iter()
-            .any(|prefix| model.starts_with(prefix))
-        {
+        if codex_model_rejects_web_search(&model) {
             return true;
         }
     }
     false
+}
+
+fn codex_catalog_settings_reject_web_search(settings: &Value) -> bool {
+    settings
+        .pointer("/modelCatalog/models")
+        .and_then(Value::as_array)
+        .is_some_and(|models| {
+            models.iter().any(|model| {
+                model
+                    .get("model")
+                    .and_then(Value::as_str)
+                    .is_some_and(codex_model_rejects_web_search)
+            })
+        })
 }
 const CODEX_MODEL_CATALOG_TEMPLATE_SLUG: &str = "gpt-5.5";
 
@@ -122,6 +139,17 @@ pub enum CodexCatalogToolProfile {
     /// (the transform drops it), so it is always disabled — see
     /// `prepare_codex_config_text_with_model_catalog`.
     Anthropic,
+}
+
+/// One provider-scoped slice of a merged routing catalog. `settings` contains
+/// only the routed rows that should be projected from that provider, while the
+/// provider's own config/profile still controls context defaults and tool
+/// compatibility for those rows.
+#[derive(Debug, Clone)]
+pub(crate) struct CodexRoutedCatalogSource {
+    pub settings: Value,
+    pub config_text: String,
+    pub profile: CodexCatalogToolProfile,
 }
 
 impl CodexCatalogToolProfile {
@@ -1017,6 +1045,74 @@ pub fn prepare_codex_config_text_with_model_catalog(
         let disable_web_search = profile == CodexCatalogToolProfile::Anthropic;
         set_codex_native_web_search_field(&config_text, disable_web_search)
     }
+}
+
+/// Generate one Codex catalog from model rows owned by different routed
+/// providers. Each source is rendered with its own tool profile, then the
+/// resulting entries are merged into the single catalog file Codex supports.
+pub(crate) fn codex_routed_model_catalog_from_sources(
+    sources: &[CodexRoutedCatalogSource],
+) -> Result<(Value, bool), AppError> {
+    let mut seen = HashSet::new();
+    let mut merged_models = Vec::new();
+    let mut disable_web_search = false;
+
+    for source in sources {
+        let Some(catalog) = codex_model_catalog_from_settings(
+            &source.settings,
+            &source.config_text,
+            source.profile,
+        )?
+        else {
+            continue;
+        };
+
+        if source.profile == CodexCatalogToolProfile::Anthropic
+            || (source.profile == CodexCatalogToolProfile::NativeResponses
+                && (codex_native_gateway_rejects_web_search(&source.config_text)
+                    || codex_catalog_settings_reject_web_search(&source.settings)))
+        {
+            disable_web_search = true;
+        }
+
+        let Some(models) = catalog.get("models").and_then(Value::as_array) else {
+            continue;
+        };
+        for model in models {
+            let Some(slug) = model.get("slug").and_then(Value::as_str) else {
+                continue;
+            };
+            if !seen.insert(slug.to_string()) {
+                continue;
+            }
+
+            let mut model = model.clone();
+            if let Some(object) = model.as_object_mut() {
+                object.insert("priority".to_string(), json!(1000 + merged_models.len()));
+            }
+            merged_models.push(model);
+        }
+    }
+
+    if merged_models.is_empty() {
+        return Err(AppError::Message(
+            "Codex model routing did not produce any catalog entries".to_string(),
+        ));
+    }
+
+    Ok((json!({ "models": merged_models }), disable_web_search))
+}
+
+pub(crate) fn project_codex_config_text_with_routed_model_catalog(
+    config_text: &str,
+    sources: &[CodexRoutedCatalogSource],
+) -> Result<String, AppError> {
+    let catalog_path = get_codex_model_catalog_path();
+    let (catalog, disable_web_search) = codex_routed_model_catalog_from_sources(sources)?;
+    let config_text = set_codex_model_catalog_json_field(config_text, Some(&catalog_path))?;
+    let config_text = set_codex_native_web_search_field(&config_text, disable_web_search)?;
+    write_json_file(&catalog_path, &catalog)?;
+    Ok(config_text)
 }
 
 /// Reverse of `prepare_codex_config_text_with_model_catalog`: read the
@@ -3143,6 +3239,34 @@ web_search = "disabled"
                 "{model} @ {host} should NOT be blacklisted"
             );
         }
+    }
+
+    #[test]
+    fn routed_catalog_disables_web_search_for_a_reject_model_on_neutral_gateway() {
+        let source = CodexRoutedCatalogSource {
+            settings: json!({
+                "modelCatalog": {
+                    "models": [{ "model": "qwen/qwen3-coder-plus" }]
+                }
+            }),
+            config_text: r#"model_provider = "custom"
+model = "gpt-5.5"
+
+[model_providers.custom]
+base_url = "https://neutral-relay.example/v1"
+wire_api = "responses"
+"#
+            .to_string(),
+            profile: CodexCatalogToolProfile::NativeResponses,
+        };
+
+        let (_, disable_web_search) = codex_routed_model_catalog_from_sources(&[source])
+            .expect("build routed native catalog");
+
+        assert!(
+            disable_web_search,
+            "the routed model itself must participate in the web-search safety decision"
+        );
     }
 
     #[test]

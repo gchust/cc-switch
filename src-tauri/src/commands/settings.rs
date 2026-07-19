@@ -811,12 +811,52 @@ pub async fn set_codex_model_provider_map(
     state: tauri::State<'_, crate::AppState>,
     mappings: std::collections::BTreeMap<String, String>,
 ) -> Result<bool, String> {
+    let _switch_guard = state
+        .proxy_service
+        .lock_switch_for_app(crate::app_config::AppType::Codex.as_str())
+        .await;
+    let _catalog_guard = crate::services::provider::lock_codex_model_catalog_projection();
     validate_model_provider_mappings(&state.db, "codex", &mappings)?;
+    let previous_mappings_were_configured = state
+        .db
+        .is_codex_model_provider_map_configured()
+        .map_err(|e| e.to_string())?;
+    let previous_mappings = state
+        .db
+        .get_codex_model_provider_map()
+        .map_err(|e| e.to_string())?;
 
     state
         .db
         .set_codex_model_provider_map(&mappings)
         .map_err(|e| e.to_string())?;
+
+    if let Err(error) =
+        crate::services::provider::refresh_codex_model_catalog_projection_unlocked(&state.db)
+    {
+        let rollback_db = if previous_mappings_were_configured {
+            state.db.set_codex_model_provider_map(&previous_mappings)
+        } else {
+            state.db.clear_codex_model_provider_map_setting()
+        };
+        let rollback_projection = if rollback_db.is_ok() {
+            crate::services::provider::refresh_codex_model_catalog_projection_unlocked(&state.db)
+                .map(|_| ())
+        } else {
+            Ok(())
+        };
+        return Err(match (rollback_db, rollback_projection) {
+            (Ok(()), Ok(())) => {
+                format!("刷新 Codex 合并模型目录失败，路由设置已回滚: {error}")
+            }
+            (Err(rollback_error), _) => format!(
+                "刷新 Codex 合并模型目录失败: {error}; 路由设置回滚也失败: {rollback_error}"
+            ),
+            (Ok(()), Err(rollback_error)) => format!(
+                "刷新 Codex 合并模型目录失败: {error}; 路由设置已回滚，但恢复原目录失败: {rollback_error}"
+            ),
+        });
+    }
     Ok(true)
 }
 

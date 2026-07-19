@@ -87,6 +87,18 @@ impl Database {
         }
     }
 
+    /// Whether the Codex routing table has ever been explicitly saved.
+    ///
+    /// This distinguishes "never configured" from an explicitly saved empty
+    /// table. Restore needs that distinction: the former must preserve a
+    /// standalone backup catalog, while the latter must not resurrect a stale
+    /// route-owned catalog after proxy takeover ends.
+    pub fn is_codex_model_provider_map_configured(&self) -> Result<bool, AppError> {
+        Ok(self
+            .get_setting(Self::CODEX_MODEL_PROVIDER_MAP_KEY)?
+            .is_some())
+    }
+
     /// 更新 Codex 模型到供应商的精确路由表。
     pub fn set_codex_model_provider_map(
         &self,
@@ -95,6 +107,18 @@ impl Database {
         let json = serde_json::to_string(mappings)
             .map_err(|e| AppError::Database(format!("序列化 Codex 模型路由配置失败: {e}")))?;
         self.set_setting(Self::CODEX_MODEL_PROVIDER_MAP_KEY, &json)
+    }
+
+    /// Remove the Codex routing setting entirely, restoring the
+    /// "never configured" state. Used only for transactional rollback.
+    pub fn clear_codex_model_provider_map_setting(&self) -> Result<(), AppError> {
+        let conn = lock_conn!(self.conn);
+        conn.execute(
+            "DELETE FROM settings WHERE key = ?1",
+            params![Self::CODEX_MODEL_PROVIDER_MAP_KEY],
+        )
+        .map_err(|e| AppError::Database(e.to_string()))?;
+        Ok(())
     }
 
     // --- 通用配置片段 (Common Config Snippet) ---
@@ -412,6 +436,9 @@ mod tests {
             .get_codex_model_provider_map()
             .expect("read default mappings")
             .is_empty());
+        assert!(!db
+            .is_codex_model_provider_map_configured()
+            .expect("read default configured state"));
     }
 
     #[test]
@@ -435,6 +462,26 @@ mod tests {
                 .as_deref(),
             Some(r#"{"gpt-5.3-codex":"provider-a","gpt-5.4":"provider-b"}"#)
         );
+        assert!(db
+            .is_codex_model_provider_map_configured()
+            .expect("read configured state"));
+    }
+
+    #[test]
+    fn explicit_empty_codex_model_provider_map_is_distinct_from_missing() {
+        let db = Database::memory().expect("memory database");
+
+        db.set_codex_model_provider_map(&BTreeMap::new())
+            .expect("save explicit empty mappings");
+        assert!(db
+            .is_codex_model_provider_map_configured()
+            .expect("read configured state"));
+
+        db.clear_codex_model_provider_map_setting()
+            .expect("clear routing setting");
+        assert!(!db
+            .is_codex_model_provider_map_configured()
+            .expect("read cleared configured state"));
     }
 
     #[test]

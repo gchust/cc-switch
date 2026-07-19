@@ -1192,12 +1192,7 @@ impl RequestForwarder {
         // below. Resolve its configured upstream model here as well, so an
         // alias from the active provider's catalog is never sent unchanged to
         // the routed provider.
-        apply_routed_codex_upstream_model(
-            app_type,
-            self.model_routed,
-            provider,
-            &mut mapped_body,
-        );
+        apply_routed_codex_upstream_model(app_type, self.model_routed, provider, &mut mapped_body);
 
         // --- Copilot 优化器：分类 + 请求体优化（在格式转换之前执行） ---
         // 注意：确定性 ID 也在此处计算，因为 mapped_body 在格式转换时会被 move
@@ -3567,14 +3562,18 @@ mod tests {
         });
         let mut body = json!({ "model": "gpt-5.4", "input": "ping" });
 
-        assert!(!super::providers::should_convert_codex_responses_to_chat(
-            &provider,
-            "/responses"
-        ));
-        assert!(!super::providers::should_convert_codex_responses_to_anthropic(
-            &provider,
-            "/responses"
-        ));
+        assert!(
+            !crate::proxy::providers::should_convert_codex_responses_to_chat(
+                &provider,
+                "/responses"
+            )
+        );
+        assert!(
+            !crate::proxy::providers::should_convert_codex_responses_to_anthropic(
+                &provider,
+                "/responses"
+            )
+        );
 
         apply_routed_codex_upstream_model(
             &AppType::Codex,

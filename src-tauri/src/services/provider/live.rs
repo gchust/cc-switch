@@ -2,7 +2,8 @@
 //!
 //! Handles reading and writing live configuration files for Claude, Codex, and Gemini.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use serde_json::{json, Value};
 use toml_edit::{DocumentMut, Item, TableLike};
@@ -30,6 +31,15 @@ use super::normalize_claude_models_in_value;
 const CODEX_OAUTH_CLAUDE_MAX_CONTEXT_TOKENS: &str = "372000";
 const CODEX_OAUTH_CLAUDE_AUTO_COMPACT_WINDOW: &str = "372000";
 const KIMI_FOR_CODING_CONTEXT_TOKENS: &str = "262144";
+
+static CODEX_MODEL_CATALOG_PROJECTION_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+pub(crate) fn lock_codex_model_catalog_projection() -> MutexGuard<'static, ()> {
+    CODEX_MODEL_CATALOG_PROJECTION_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 /// Model env keys Claude Code may route requests through. The defaults above
 /// are calibrated against gpt-5.6's Codex catalog, so every configured model
@@ -700,6 +710,8 @@ pub(crate) fn write_live_with_common_config(
     app_type: &AppType,
     provider: &Provider,
 ) -> Result<(), AppError> {
+    let _codex_catalog_guard =
+        matches!(app_type, AppType::Codex).then(lock_codex_model_catalog_projection);
     let mut effective_provider = provider.clone();
     effective_provider.settings_config =
         build_effective_settings_with_common_config(db, app_type, provider)?;
@@ -714,7 +726,230 @@ pub(crate) fn write_live_with_common_config(
         return Ok(());
     }
 
+    if matches!(app_type, AppType::Codex) {
+        let settings = effective_provider
+            .settings_config
+            .as_object()
+            .ok_or_else(|| AppError::Config("Codex 供应商配置必须是 JSON 对象".to_string()))?;
+        let auth = settings
+            .get("auth")
+            .ok_or_else(|| AppError::Config("Codex 供应商配置缺少 'auth' 字段".to_string()))?;
+        let config_text = settings.get("config").and_then(Value::as_str);
+        let profile =
+            crate::proxy::providers::resolve_codex_catalog_tool_profile(&effective_provider);
+        write_codex_provider_live_with_catalog_projection(
+            db,
+            &effective_provider.settings_config,
+            effective_provider.category.as_deref(),
+            auth,
+            config_text,
+            profile,
+        )?;
+        return Ok(());
+    }
+
     write_live_snapshot(app_type, &effective_provider)
+}
+
+fn codex_routed_model_config(provider: &Provider, route_model: &str) -> Value {
+    let models = provider
+        .settings_config
+        .get("modelCatalog")
+        .and_then(|catalog| catalog.get("models"))
+        .and_then(Value::as_array);
+    let upstream_model = crate::proxy::providers::codex_provider_upstream_model(provider);
+
+    let selected = models.and_then(|models| {
+        models
+            .iter()
+            .find(|model| model.get("model").and_then(Value::as_str) == Some(route_model))
+            .or_else(|| {
+                upstream_model.as_deref().and_then(|upstream_model| {
+                    models.iter().find(|model| {
+                        model.get("model").and_then(Value::as_str) == Some(upstream_model)
+                    })
+                })
+            })
+            .or_else(|| models.first())
+    });
+
+    let mut model = selected
+        .cloned()
+        .unwrap_or_else(|| json!({ "model": route_model }));
+    if let Some(object) = model.as_object_mut() {
+        object.insert("model".to_string(), json!(route_model));
+    }
+    model
+}
+
+pub(crate) fn build_codex_routed_catalog_sources(
+    db: &Database,
+) -> Result<Vec<crate::codex_config::CodexRoutedCatalogSource>, AppError> {
+    let mappings = db.get_codex_model_provider_map()?;
+    if mappings.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut provider_models: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for (model, provider_id) in mappings {
+        provider_models.entry(provider_id).or_default().push(model);
+    }
+
+    let mut sources = Vec::new();
+    for (provider_id, route_models) in provider_models {
+        let provider = db
+            .get_provider_by_id(&provider_id, AppType::Codex.as_str())?
+            .ok_or_else(|| {
+                AppError::Config(format!(
+                    "Codex model route references missing provider: {provider_id}"
+                ))
+            })?;
+        let mut effective_provider = provider.clone();
+        effective_provider.settings_config =
+            build_effective_settings_with_common_config(db, &AppType::Codex, &provider)?;
+        let models = route_models
+            .iter()
+            .map(|model| codex_routed_model_config(&effective_provider, model))
+            .collect::<Vec<_>>();
+        let config_text = effective_provider
+            .settings_config
+            .get("config")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+
+        sources.push(crate::codex_config::CodexRoutedCatalogSource {
+            settings: json!({ "modelCatalog": { "models": models } }),
+            config_text,
+            profile: crate::proxy::providers::resolve_codex_catalog_tool_profile(
+                &effective_provider,
+            ),
+        });
+    }
+
+    Ok(sources)
+}
+
+pub(crate) fn prepare_codex_config_text_with_model_catalog_projection(
+    db: &Database,
+    settings: &Value,
+    config_text: &str,
+    profile: crate::codex_config::CodexCatalogToolProfile,
+) -> Result<String, AppError> {
+    let sources = build_codex_routed_catalog_sources(db)?;
+    if sources.is_empty() {
+        crate::codex_config::prepare_codex_config_text_with_model_catalog(
+            settings,
+            config_text,
+            profile,
+        )
+    } else {
+        crate::codex_config::project_codex_config_text_with_routed_model_catalog(
+            config_text,
+            &sources,
+        )
+    }
+}
+
+pub(crate) fn prepare_codex_live_config_text_with_optional_catalog_projection(
+    db: &Database,
+    settings: &Value,
+    config_text: &str,
+    profile: crate::codex_config::CodexCatalogToolProfile,
+) -> Result<String, AppError> {
+    let sources = build_codex_routed_catalog_sources(db)?;
+    if sources.is_empty() {
+        crate::codex_config::prepare_codex_live_config_text_with_optional_catalog(
+            settings,
+            config_text,
+            profile,
+        )
+    } else {
+        crate::codex_config::project_codex_config_text_with_routed_model_catalog(
+            config_text,
+            &sources,
+        )
+    }
+}
+
+pub(crate) fn write_codex_provider_live_with_catalog_projection(
+    db: &Database,
+    settings: &Value,
+    category: Option<&str>,
+    auth: &Value,
+    config_text: Option<&str>,
+    profile: crate::codex_config::CodexCatalogToolProfile,
+) -> Result<(), AppError> {
+    let prepared_config = config_text
+        .map(|config_text| {
+            prepare_codex_config_text_with_model_catalog_projection(
+                db,
+                settings,
+                config_text,
+                profile,
+            )
+        })
+        .transpose()?;
+    crate::codex_config::write_codex_live_for_provider(category, auth, prepared_config.as_deref())
+}
+
+/// Re-project the single Codex catalog from all providers referenced by the
+/// exact model routing table. Returns false when routing is disabled.
+pub(crate) fn project_codex_routed_model_catalog(db: &Database) -> Result<bool, AppError> {
+    let sources = build_codex_routed_catalog_sources(db)?;
+    if sources.is_empty() {
+        return Ok(false);
+    }
+
+    let config_text = crate::codex_config::read_and_validate_codex_config_text()?;
+    let config_text = crate::codex_config::project_codex_config_text_with_routed_model_catalog(
+        &config_text,
+        &sources,
+    )?;
+    crate::codex_config::write_codex_live_config_atomic(Some(&config_text))?;
+    Ok(true)
+}
+
+/// Restore the current provider's own catalog after the routing table is
+/// cleared, without replacing auth/base URL/current-provider fields.
+pub(crate) fn project_current_codex_provider_catalog(db: &Database) -> Result<bool, AppError> {
+    let provider = match crate::settings::get_effective_current_provider(db, &AppType::Codex)? {
+        Some(provider_id) => db.get_provider_by_id(&provider_id, AppType::Codex.as_str())?,
+        None => None,
+    };
+
+    let config_text = crate::codex_config::read_and_validate_codex_config_text()?;
+    let Some(provider) = provider else {
+        let config_text = crate::codex_config::prepare_codex_config_text_with_model_catalog(
+            &json!({}),
+            &config_text,
+            crate::codex_config::CodexCatalogToolProfile::ProxyChat,
+        )?;
+        crate::codex_config::write_codex_live_config_atomic(Some(&config_text))?;
+        return Ok(true);
+    };
+    let mut effective_provider = provider.clone();
+    effective_provider.settings_config =
+        build_effective_settings_with_common_config(db, &AppType::Codex, &provider)?;
+
+    let profile = crate::proxy::providers::resolve_codex_catalog_tool_profile(&effective_provider);
+    let config_text = crate::codex_config::prepare_codex_config_text_with_model_catalog(
+        &effective_provider.settings_config,
+        &config_text,
+        profile,
+    )?;
+    crate::codex_config::write_codex_live_config_atomic(Some(&config_text))?;
+    Ok(true)
+}
+
+pub(crate) fn refresh_codex_model_catalog_projection_unlocked(
+    db: &Database,
+) -> Result<bool, AppError> {
+    if project_codex_routed_model_catalog(db)? {
+        Ok(true)
+    } else {
+        project_current_codex_provider_catalog(db)
+    }
 }
 
 pub(crate) fn strip_common_config_from_live_settings(
@@ -1953,6 +2188,319 @@ pub fn remove_openclaw_provider_from_live(provider_id: &str) -> Result<(), AppEr
 mod tests {
     use super::*;
     use serde_json::json;
+    use serial_test::serial;
+    use std::ffi::OsString;
+
+    struct CodexProjectionTestHome {
+        _dir: tempfile::TempDir,
+        original_test_home: Option<OsString>,
+        original_current_provider: Option<String>,
+    }
+
+    impl CodexProjectionTestHome {
+        fn new() -> Self {
+            let dir = tempfile::tempdir().expect("create temporary Codex home");
+            let original_test_home = std::env::var_os("CC_SWITCH_TEST_HOME");
+            let original_current_provider = crate::settings::get_current_provider(&AppType::Codex);
+            std::env::set_var("CC_SWITCH_TEST_HOME", dir.path());
+            crate::settings::set_current_provider(&AppType::Codex, None)
+                .expect("clear current Codex provider for test");
+            Self {
+                _dir: dir,
+                original_test_home,
+                original_current_provider,
+            }
+        }
+    }
+
+    impl Drop for CodexProjectionTestHome {
+        fn drop(&mut self) {
+            let _ = crate::settings::set_current_provider(
+                &AppType::Codex,
+                self.original_current_provider.as_deref(),
+            );
+            match &self.original_test_home {
+                Some(home) => std::env::set_var("CC_SWITCH_TEST_HOME", home),
+                None => std::env::remove_var("CC_SWITCH_TEST_HOME"),
+            }
+        }
+    }
+
+    fn codex_projection_test_provider(
+        id: &str,
+        api_format: &str,
+        upstream_model: &str,
+        context_window: u64,
+        extra_models: Vec<Value>,
+        common_config_enabled: bool,
+    ) -> Provider {
+        let provider_id = format!("provider-{id}");
+        let mut default_model = json!({
+            "model": upstream_model,
+            "displayName": format!("{id} default")
+        });
+        if context_window > 0 {
+            default_model["contextWindow"] = json!(context_window);
+        }
+        let mut models = vec![default_model];
+        models.extend(extra_models);
+        let mut provider = Provider::with_id(
+            id.to_string(),
+            id.to_string(),
+            json!({
+                "auth": { "OPENAI_API_KEY": format!("sk-{id}") },
+                "config": format!(
+                    "model_provider = \"{provider_id}\"\nmodel = \"{upstream_model}\"\n\n[model_providers.{provider_id}]\nname = \"{id}\"\nbase_url = \"https://{id}.example/v1\"\nwire_api = \"responses\"\n"
+                ),
+                "modelCatalog": { "models": models }
+            }),
+            None,
+        );
+        provider.meta = Some(crate::provider::ProviderMeta {
+            api_format: Some(api_format.to_string()),
+            common_config_enabled: Some(common_config_enabled),
+            ..Default::default()
+        });
+        provider
+    }
+
+    #[test]
+    #[serial]
+    fn codex_routed_catalog_merges_targets_and_survives_provider_switches() {
+        let _home = CodexProjectionTestHome::new();
+        let db = Database::memory().expect("create memory db");
+        db.set_config_snippet(
+            AppType::Codex.as_str(),
+            Some("model_context_window = 222222\n".to_string()),
+        )
+        .expect("save Codex common config");
+
+        let chat = codex_projection_test_provider(
+            "a-chat",
+            "openai_chat",
+            "chat-upstream",
+            0,
+            vec![json!({
+                "model": "chat-unused",
+                "displayName": "Chat unused",
+                "contextWindow": 64_000
+            })],
+            true,
+        );
+        let native = codex_projection_test_provider(
+            "b-native",
+            "openai_responses",
+            "native-upstream",
+            256_000,
+            vec![
+                json!({
+                    "model": "native-special",
+                    "displayName": "Native special",
+                    "contextWindow": 300_000,
+                    "supportsParallelToolCalls": false
+                }),
+                json!({
+                    "model": "native-unused",
+                    "displayName": "Native unused",
+                    "contextWindow": 96_000
+                }),
+            ],
+            false,
+        );
+        let anthropic = codex_projection_test_provider(
+            "c-anthropic",
+            "anthropic",
+            "claude-upstream",
+            200_000,
+            vec![json!({
+                "model": "claude-unused",
+                "displayName": "Claude unused",
+                "contextWindow": 100_000
+            })],
+            false,
+        );
+
+        for provider in [&chat, &native, &anthropic] {
+            db.save_provider(AppType::Codex.as_str(), provider)
+                .expect("save routed Codex provider");
+        }
+        db.set_codex_model_provider_map(&BTreeMap::from([
+            ("chat-alias".to_string(), chat.id.clone()),
+            ("claude-alias".to_string(), anthropic.id.clone()),
+            ("native-special".to_string(), native.id.clone()),
+        ]))
+        .expect("save Codex model routes");
+
+        db.set_current_provider(AppType::Codex.as_str(), &chat.id)
+            .expect("select chat provider");
+        crate::settings::set_current_provider(&AppType::Codex, Some(&chat.id))
+            .expect("persist chat provider selection");
+        write_live_with_common_config(&db, &AppType::Codex, &chat)
+            .expect("write chat provider with routed catalog");
+
+        let first_catalog: Value =
+            read_json_file(&crate::codex_config::get_codex_model_catalog_path())
+                .expect("read first routed catalog");
+        let first_models = first_catalog["models"]
+            .as_array()
+            .expect("first routed model array");
+        let first_slugs = first_models
+            .iter()
+            .filter_map(|model| model.get("slug").and_then(Value::as_str))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            first_slugs,
+            vec!["chat-alias", "native-special", "claude-alias"],
+            "only explicitly routed models should be exposed"
+        );
+
+        let model = |slug: &str| {
+            first_models
+                .iter()
+                .find(|model| model.get("slug").and_then(Value::as_str) == Some(slug))
+                .expect("routed model should exist")
+        };
+        assert_eq!(
+            model("chat-alias")
+                .get("display_name")
+                .and_then(Value::as_str),
+            Some("a-chat default"),
+            "an alias should inherit the target provider's default model metadata"
+        );
+        assert_eq!(
+            model("chat-alias")
+                .get("context_window")
+                .and_then(Value::as_u64),
+            Some(222_222),
+            "routed metadata should include the target provider's effective common config"
+        );
+        assert!(
+            model("chat-alias").get("apply_patch_tool_type").is_some(),
+            "chat providers should keep the proxy-compatible tool profile"
+        );
+        assert_eq!(
+            model("native-special")
+                .get("display_name")
+                .and_then(Value::as_str),
+            Some("Native special")
+        );
+        assert!(
+            model("native-special")
+                .get("apply_patch_tool_type")
+                .is_none(),
+            "native Responses providers must not expose freeform apply_patch"
+        );
+        assert!(
+            model("claude-alias").get("apply_patch_tool_type").is_none(),
+            "Anthropic providers must not expose freeform apply_patch"
+        );
+
+        let first_config = crate::codex_config::read_and_validate_codex_config_text()
+            .expect("read first projected config");
+        let first_toml: toml::Value = toml::from_str(&first_config).expect("parse first config");
+        assert_eq!(
+            first_toml
+                .get("model_provider")
+                .and_then(toml::Value::as_str),
+            Some("provider-a-chat")
+        );
+        assert_eq!(
+            first_toml.get("web_search").and_then(toml::Value::as_str),
+            Some("disabled"),
+            "one Anthropic target should safely disable web search for the merged catalog"
+        );
+
+        db.set_current_provider(AppType::Codex.as_str(), &native.id)
+            .expect("select native provider");
+        crate::settings::set_current_provider(&AppType::Codex, Some(&native.id))
+            .expect("persist native provider selection");
+        write_live_with_common_config(&db, &AppType::Codex, &native)
+            .expect("switch provider without replacing routed catalog");
+
+        let second_catalog: Value =
+            read_json_file(&crate::codex_config::get_codex_model_catalog_path())
+                .expect("read routed catalog after switch");
+        assert_eq!(
+            second_catalog, first_catalog,
+            "provider switching must not replace the route-owned catalog"
+        );
+        let second_config = crate::codex_config::read_and_validate_codex_config_text()
+            .expect("read projected config after switch");
+        let second_toml: toml::Value = toml::from_str(&second_config).expect("parse second config");
+        assert_eq!(
+            second_toml
+                .get("model_provider")
+                .and_then(toml::Value::as_str),
+            Some("provider-b-native"),
+            "switching should still update the active provider and base URL"
+        );
+        assert_eq!(
+            second_toml
+                .get("model_providers")
+                .and_then(|providers| providers.get("provider-b-native"))
+                .and_then(|provider| provider.get("base_url"))
+                .and_then(toml::Value::as_str),
+            Some("https://b-native.example/v1")
+        );
+
+        db.set_codex_model_provider_map(&BTreeMap::new())
+            .expect("clear Codex model routes");
+        refresh_codex_model_catalog_projection_unlocked(&db)
+            .expect("restore the current provider catalog after clearing routes");
+        let restored_catalog: Value =
+            read_json_file(&crate::codex_config::get_codex_model_catalog_path())
+                .expect("read restored native catalog");
+        let restored_slugs = restored_catalog["models"]
+            .as_array()
+            .expect("restored model array")
+            .iter()
+            .filter_map(|model| model.get("slug").and_then(Value::as_str))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            restored_slugs,
+            vec!["native-upstream", "native-special", "native-unused"],
+            "clearing routes should restore the current provider's full catalog"
+        );
+        let restored_config = crate::codex_config::read_and_validate_codex_config_text()
+            .expect("read config after clearing routes");
+        let restored_toml: toml::Value =
+            toml::from_str(&restored_config).expect("parse restored config");
+        assert_eq!(
+            restored_toml
+                .get("model_provider")
+                .and_then(toml::Value::as_str),
+            Some("provider-b-native"),
+            "restoring the current catalog must preserve provider selection"
+        );
+        assert!(
+            restored_toml.get("web_search").is_none(),
+            "the route-owned Anthropic web-search guard should be removed after routes are cleared"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn clearing_routes_without_current_provider_removes_owned_projection() {
+        let _home = CodexProjectionTestHome::new();
+        let db = Database::memory().expect("create memory db");
+        crate::codex_config::write_codex_live_config_atomic(Some(
+            "model_provider = \"custom\"\nmodel_catalog_json = \"cc-switch-model-catalog.json\"\nweb_search = \"disabled\"\n",
+        ))
+        .expect("write stale routed config");
+
+        refresh_codex_model_catalog_projection_unlocked(&db)
+            .expect("clear projection without a current provider");
+
+        let config = crate::codex_config::read_and_validate_codex_config_text()
+            .expect("read cleaned config");
+        let config: toml::Value = toml::from_str(&config).expect("parse cleaned config");
+        assert_eq!(
+            config.get("model_provider").and_then(toml::Value::as_str),
+            Some("custom")
+        );
+        assert!(config.get("model_catalog_json").is_none());
+        assert!(config.get("web_search").is_none());
+    }
 
     #[test]
     fn kimi_for_coding_effective_settings_backfill_256k_context() {
