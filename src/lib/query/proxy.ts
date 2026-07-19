@@ -1,12 +1,17 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { proxyApi } from "@/lib/api/proxy";
-import { settingsApi, type ClaudeModelProviderMap } from "@/lib/api/settings";
+import {
+  settingsApi,
+  type ModelProviderMap,
+  type ModelProviderRoutingApp,
+} from "@/lib/api/settings";
 import { toast } from "sonner";
 import { useTranslation } from "react-i18next";
 import type { GlobalProxyConfig, AppProxyConfig } from "@/types/proxy";
 import { extractErrorMessage } from "@/utils/errorUtils";
 
-const CLAUDE_MODEL_PROVIDER_MAP_KEY = ["claudeModelProviderMap"] as const;
+const modelProviderMapKey = (appType: ModelProviderRoutingApp) =>
+  ["modelProviderMap", appType] as const;
 
 // ========== 代理服务器状态 Hooks ==========
 
@@ -246,29 +251,44 @@ export function useUpdateAppProxyConfig() {
   });
 }
 
-export function useClaudeModelProviderMap() {
+export function useModelProviderMap(appType: ModelProviderRoutingApp) {
   return useQuery({
-    queryKey: CLAUDE_MODEL_PROVIDER_MAP_KEY,
-    queryFn: () => settingsApi.getClaudeModelProviderMap(),
+    queryKey: modelProviderMapKey(appType),
+    queryFn: () => settingsApi.getModelProviderMap(appType),
   });
 }
 
-export function useUpdateClaudeModelProviderMap() {
+export function useUpdateModelProviderMap(appType: ModelProviderRoutingApp) {
   const queryClient = useQueryClient();
   const { t } = useTranslation();
+  const appName = appType === "claude" ? "Claude" : "Codex";
 
   return useMutation({
-    mutationFn: (mappings: ClaudeModelProviderMap) =>
-      settingsApi.setClaudeModelProviderMap(mappings),
-    onSuccess: (_, mappings) => {
-      queryClient.setQueryData(CLAUDE_MODEL_PROVIDER_MAP_KEY, mappings);
-      toast.success(t("proxy.modelProviderMapping.saved"), {
+    mutationFn: async (mappings: ModelProviderMap) => {
+      const saved = await settingsApi.setModelProviderMap(appType, mappings);
+      if (!saved) {
+        throw new Error("Model provider routes were not saved");
+      }
+      return mappings;
+    },
+    onMutate: async () => {
+      await queryClient.cancelQueries({
+        queryKey: modelProviderMapKey(appType),
+      });
+    },
+    onSuccess: async (mappings) => {
+      await queryClient.cancelQueries({
+        queryKey: modelProviderMapKey(appType),
+      });
+      queryClient.setQueryData(modelProviderMapKey(appType), mappings);
+      toast.success(t("proxy.modelProviderMapping.saved", { app: appName }), {
         closeButton: true,
       });
     },
     onError: (error: unknown) => {
       toast.error(
         t("proxy.modelProviderMapping.saveFailed", {
+          app: appName,
           error: extractErrorMessage(error),
         }),
       );

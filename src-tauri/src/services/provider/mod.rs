@@ -124,7 +124,7 @@ mod tests {
     use crate::database::Database;
     #[cfg(any(target_os = "macos", windows))]
     use crate::provider::{ClaudeDesktopMode, ClaudeDesktopModelRoute};
-    use crate::provider::{ProviderMeta, UsageScript};
+    use crate::provider::{ProviderMeta, UniversalProvider, UsageScript};
     use crate::proxy::types::ProxyConfig;
     use crate::store::AppState;
     use serde_json::json;
@@ -1954,6 +1954,243 @@ requires_openai_auth = true
             );
         });
     }
+
+    #[test]
+    #[serial]
+    fn delete_rejects_codex_provider_used_by_model_route() {
+        with_test_home(|state, _| {
+            let provider = Provider::with_id(
+                "codex-routed".to_string(),
+                "Codex Routed".to_string(),
+                json!({}),
+                None,
+            );
+            state
+                .db
+                .save_provider(AppType::Codex.as_str(), &provider)
+                .expect("save Codex provider");
+            state
+                .db
+                .set_codex_model_provider_map(&std::collections::BTreeMap::from([(
+                    "gpt-5.4".to_string(),
+                    provider.id.clone(),
+                )]))
+                .expect("save Codex model route");
+
+            let error = ProviderService::delete(state, AppType::Codex, &provider.id)
+                .expect_err("routed Codex provider deletion should fail");
+
+            assert!(error.to_string().contains("Codex 模型路由"));
+            assert!(state
+                .db
+                .get_provider_by_id(&provider.id, AppType::Codex.as_str())
+                .expect("query Codex provider")
+                .is_some());
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn delete_universal_rejects_routed_codex_child_before_parent_delete() {
+        with_test_home(|state, _| {
+            let mut universal = UniversalProvider::new(
+                "shared".to_string(),
+                "Shared".to_string(),
+                "custom".to_string(),
+                "https://api.example.com".to_string(),
+                "test-key".to_string(),
+            );
+            universal.apps.codex = true;
+            ProviderService::upsert_universal(state, universal).expect("save universal provider");
+            ProviderService::sync_universal_to_apps(state, "shared")
+                .expect("create universal Codex child");
+            state
+                .db
+                .set_codex_model_provider_map(&std::collections::BTreeMap::from([(
+                    "gpt-5.4".to_string(),
+                    "universal-codex-shared".to_string(),
+                )]))
+                .expect("save Codex model route");
+
+            let error = ProviderService::delete_universal(state, "shared")
+                .expect_err("routed Codex child should protect universal parent");
+
+            assert!(error.to_string().contains("Codex 模型路由"));
+            assert!(state
+                .db
+                .get_universal_provider("shared")
+                .expect("query universal provider")
+                .is_some());
+            assert!(state
+                .db
+                .get_provider_by_id("universal-codex-shared", AppType::Codex.as_str())
+                .expect("query Codex child")
+                .is_some());
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn sync_universal_preflights_routed_codex_child_before_other_app_changes() {
+        with_test_home(|state, _| {
+            let mut universal = UniversalProvider::new(
+                "shared".to_string(),
+                "Shared".to_string(),
+                "custom".to_string(),
+                "https://api.example.com".to_string(),
+                "test-key".to_string(),
+            );
+            universal.apps.codex = true;
+            ProviderService::upsert_universal(state, universal.clone())
+                .expect("save universal provider");
+            ProviderService::sync_universal_to_apps(state, "shared")
+                .expect("create universal Codex child");
+            state
+                .db
+                .set_codex_model_provider_map(&std::collections::BTreeMap::from([(
+                    "gpt-5.4".to_string(),
+                    "universal-codex-shared".to_string(),
+                )]))
+                .expect("save Codex model route");
+
+            universal.apps.codex = false;
+            universal.apps.claude = true;
+            ProviderService::upsert_universal(state, universal)
+                .expect("save disabled Codex app state");
+
+            let error = ProviderService::sync_universal_to_apps(state, "shared")
+                .expect_err("disabling routed Codex child should fail");
+
+            assert!(error.to_string().contains("Codex 模型路由"));
+            assert!(state
+                .db
+                .get_provider_by_id("universal-codex-shared", AppType::Codex.as_str())
+                .expect("query Codex child")
+                .is_some());
+            assert!(state
+                .db
+                .get_provider_by_id("universal-claude-shared", AppType::Claude.as_str())
+                .expect("query Claude child")
+                .is_none());
+
+            let deleted = ProviderService::delete_universal(state, "shared")
+                .expect("stale disabled child should not block parent deletion");
+            assert!(deleted);
+            assert!(state
+                .db
+                .get_universal_provider("shared")
+                .expect("query universal provider after delete")
+                .is_none());
+            assert!(state
+                .db
+                .get_provider_by_id("universal-codex-shared", AppType::Codex.as_str())
+                .expect("query retained Codex child")
+                .is_some());
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn delete_universal_rejects_current_codex_child() {
+        with_test_home(|state, _| {
+            let mut universal = UniversalProvider::new(
+                "current-child".to_string(),
+                "Current Child".to_string(),
+                "custom".to_string(),
+                "https://api.example.com".to_string(),
+                "test-key".to_string(),
+            );
+            universal.apps.codex = true;
+            ProviderService::upsert_universal(state, universal).expect("save universal provider");
+            ProviderService::sync_universal_to_apps(state, "current-child")
+                .expect("create Codex child");
+            state
+                .db
+                .set_current_provider("codex", "universal-codex-current-child")
+                .expect("set current Codex child");
+
+            let error = ProviderService::delete_universal(state, "current-child")
+                .expect_err("current child should protect universal parent");
+
+            assert!(error.to_string().contains("当前正在使用"));
+            assert!(state
+                .db
+                .get_universal_provider("current-child")
+                .expect("query universal provider")
+                .is_some());
+            assert!(state
+                .db
+                .get_provider_by_id("universal-codex-current-child", AppType::Codex.as_str(),)
+                .expect("query current child")
+                .is_some());
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn delete_missing_universal_does_not_touch_matching_provider_id() {
+        with_test_home(|state, _| {
+            let provider = Provider::with_id(
+                "universal-codex-missing".to_string(),
+                "Unrelated Provider".to_string(),
+                json!({}),
+                None,
+            );
+            state
+                .db
+                .save_provider(AppType::Codex.as_str(), &provider)
+                .expect("save unrelated provider");
+
+            let deleted = ProviderService::delete_universal(state, "missing")
+                .expect("missing parent delete should be a no-op");
+
+            assert!(!deleted);
+            assert!(state
+                .db
+                .get_provider_by_id(&provider.id, AppType::Codex.as_str())
+                .expect("query unrelated provider")
+                .is_some());
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn sync_universal_rejects_deterministic_id_collision() {
+        with_test_home(|state, _| {
+            let mut universal = UniversalProvider::new(
+                "collision".to_string(),
+                "Universal".to_string(),
+                "custom".to_string(),
+                "https://api.example.com".to_string(),
+                "test-key".to_string(),
+            );
+            universal.apps.codex = true;
+            ProviderService::upsert_universal(state, universal).expect("save universal provider");
+
+            let collision = Provider::with_id(
+                "universal-codex-collision".to_string(),
+                "Unrelated Provider".to_string(),
+                json!({ "original": true }),
+                None,
+            );
+            state
+                .db
+                .save_provider(AppType::Codex.as_str(), &collision)
+                .expect("save colliding provider");
+
+            let error = ProviderService::sync_universal_to_apps(state, "collision")
+                .expect_err("unowned deterministic ID must not be overwritten");
+
+            assert!(error.to_string().contains("已被其他配置占用"));
+            let saved = state
+                .db
+                .get_provider_by_id(&collision.id, AppType::Codex.as_str())
+                .expect("query colliding provider")
+                .expect("colliding provider should remain");
+            assert_eq!(saved.name, "Unrelated Provider");
+            assert_eq!(saved.settings_config, json!({ "original": true }));
+        });
+    }
 }
 
 impl ProviderService {
@@ -2361,20 +2598,45 @@ impl ProviderService {
         Ok(true)
     }
 
-    fn ensure_claude_provider_not_model_routed(
+    fn ensure_provider_not_model_routed(
         state: &AppState,
+        app_type: &AppType,
         provider_id: &str,
     ) -> Result<(), AppError> {
-        if state
-            .db
-            .get_claude_model_provider_map()?
+        let (mappings, app_label) = match app_type {
+            AppType::Claude => (state.db.get_claude_model_provider_map()?, "Claude"),
+            AppType::Codex => (state.db.get_codex_model_provider_map()?, "Codex"),
+            _ => return Ok(()),
+        };
+
+        if mappings
             .values()
             .any(|mapped_provider_id| mapped_provider_id == provider_id)
         {
+            return Err(AppError::Message(format!(
+                "无法删除模型路由正在使用的供应商，请先移除对应的 {app_label} 模型路由"
+            )));
+        }
+        Ok(())
+    }
+
+    fn ensure_provider_deletable(
+        state: &AppState,
+        app_type: &AppType,
+        provider_id: &str,
+    ) -> Result<(), AppError> {
+        Self::ensure_provider_not_model_routed(state, app_type, provider_id)?;
+
+        let local_current = crate::settings::get_current_provider(app_type);
+        let db_current = state.db.get_current_provider(app_type.as_str())?;
+        if local_current.as_deref() == Some(provider_id)
+            || db_current.as_deref() == Some(provider_id)
+        {
             return Err(AppError::Message(
-                "无法删除模型路由正在使用的供应商，请先移除对应的 Claude 模型路由".to_string(),
+                "无法删除当前正在使用的供应商".to_string(),
             ));
         }
+
         Ok(())
     }
 
@@ -2431,20 +2693,9 @@ impl ProviderService {
             return Ok(());
         }
 
-        // Claude 模型路由保存的是 provider ID。先阻止删除被引用的供应商，避免留下失效路由。
-        if matches!(app_type, AppType::Claude) {
-            Self::ensure_claude_provider_not_model_routed(state, id)?;
-        }
-
-        // For other apps: Check both local settings and database
-        let local_current = crate::settings::get_current_provider(&app_type);
-        let db_current = state.db.get_current_provider(app_type.as_str())?;
-
-        if local_current.as_deref() == Some(id) || db_current.as_deref() == Some(id) {
-            return Err(AppError::Message(
-                "无法删除当前正在使用的供应商".to_string(),
-            ));
-        }
+        // Claude/Codex 模型路由保存的是应用内 provider ID；所有应用还需要同时
+        // 检查本地 settings 与数据库的当前供应商，避免删除仍在使用的配置。
+        Self::ensure_provider_deletable(state, &app_type, id)?;
 
         state.db.delete_provider(app_type.as_str(), id)
     }
@@ -3904,37 +4155,75 @@ impl ProviderService {
         Ok(true)
     }
 
+    fn ensure_universal_child_owned(
+        parent: &UniversalProvider,
+        child: &Provider,
+    ) -> Result<(), AppError> {
+        if child.category.as_deref() != Some("aggregator") || child.created_at != parent.created_at
+        {
+            return Err(AppError::Message(format!(
+                "供应商 ID {} 已被其他配置占用，无法同步统一供应商",
+                child.id
+            )));
+        }
+        Ok(())
+    }
+
+    fn preflight_universal_child(
+        state: &AppState,
+        parent: &UniversalProvider,
+        app_type: &AppType,
+        child_id: &str,
+        deleting: bool,
+    ) -> Result<Option<Provider>, AppError> {
+        let child = state.db.get_provider_by_id(child_id, app_type.as_str())?;
+        if let Some(child) = child.as_ref() {
+            Self::ensure_universal_child_owned(parent, child)?;
+            if deleting {
+                Self::ensure_provider_deletable(state, app_type, child_id)?;
+            }
+        }
+        Ok(child)
+    }
+
     /// 删除统一供应商
     pub fn delete_universal(state: &AppState, id: &str) -> Result<bool, AppError> {
-        // 获取统一供应商（用于删除生成的子供应商）
-        let provider = state.db.get_universal_provider(id)?;
-        if let Some(provider) = provider.as_ref() {
-            if provider.apps.claude {
-                let claude_id = format!("universal-claude-{id}");
-                Self::ensure_claude_provider_not_model_routed(state, &claude_id)?;
-            }
+        let Some(provider) = state.db.get_universal_provider(id)? else {
+            return Ok(false);
+        };
+
+        let claude_id = format!("universal-claude-{id}");
+        let codex_id = format!("universal-codex-{id}");
+        let gemini_id = format!("universal-gemini-{id}");
+
+        // 先完成所有引用、当前供应商与 ID 归属检查，避免删除到一半才失败。
+        let claude_child = if provider.apps.claude {
+            Self::preflight_universal_child(state, &provider, &AppType::Claude, &claude_id, true)?
+        } else {
+            None
+        };
+        let codex_child = if provider.apps.codex {
+            Self::preflight_universal_child(state, &provider, &AppType::Codex, &codex_id, true)?
+        } else {
+            None
+        };
+        let gemini_child = if provider.apps.gemini {
+            Self::preflight_universal_child(state, &provider, &AppType::Gemini, &gemini_id, true)?
+        } else {
+            None
+        };
+
+        if claude_child.is_some() {
+            state.db.delete_provider("claude", &claude_id)?;
+        }
+        if codex_child.is_some() {
+            state.db.delete_provider("codex", &codex_id)?;
+        }
+        if gemini_child.is_some() {
+            state.db.delete_provider("gemini", &gemini_id)?;
         }
 
-        // 删除统一供应商
-        state.db.delete_universal_provider(id)?;
-
-        // 删除生成的子供应商
-        if let Some(p) = provider {
-            if p.apps.claude {
-                let claude_id = format!("universal-claude-{id}");
-                let _ = state.db.delete_provider("claude", &claude_id);
-            }
-            if p.apps.codex {
-                let codex_id = format!("universal-codex-{id}");
-                let _ = state.db.delete_provider("codex", &codex_id);
-            }
-            if p.apps.gemini {
-                let gemini_id = format!("universal-gemini-{id}");
-                let _ = state.db.delete_provider("gemini", &gemini_id);
-            }
-        }
-
-        Ok(true)
+        state.db.delete_universal_provider(id)
     }
 
     /// 同步统一供应商到各应用
@@ -3944,48 +4233,67 @@ impl ProviderService {
             .get_universal_provider(id)?
             .ok_or_else(|| AppError::Message(format!("统一供应商 {id} 不存在")))?;
 
-        // 同步到 Claude
-        if let Some(mut claude_provider) = provider.to_claude_provider() {
-            // 合并已有配置
-            if let Some(existing) = state.db.get_provider_by_id(&claude_provider.id, "claude")? {
-                let mut merged = existing.settings_config.clone();
+        let claude_id = format!("universal-claude-{id}");
+        let codex_id = format!("universal-codex-{id}");
+        let gemini_id = format!("universal-gemini-{id}");
+        let claude_provider = provider.to_claude_provider();
+        let codex_provider = provider.to_codex_provider();
+        let gemini_provider = provider.to_gemini_provider();
+
+        // 在首次写入前完成三个应用的碰撞与删除检查，失败时不产生部分同步。
+        let claude_existing = Self::preflight_universal_child(
+            state,
+            &provider,
+            &AppType::Claude,
+            &claude_id,
+            claude_provider.is_none(),
+        )?;
+        let codex_existing = Self::preflight_universal_child(
+            state,
+            &provider,
+            &AppType::Codex,
+            &codex_id,
+            codex_provider.is_none(),
+        )?;
+        let gemini_existing = Self::preflight_universal_child(
+            state,
+            &provider,
+            &AppType::Gemini,
+            &gemini_id,
+            gemini_provider.is_none(),
+        )?;
+
+        if let Some(mut claude_provider) = claude_provider {
+            if let Some(existing) = claude_existing {
+                let mut merged = existing.settings_config;
                 Self::merge_json(&mut merged, &claude_provider.settings_config);
                 claude_provider.settings_config = merged;
             }
             state.db.save_provider("claude", &claude_provider)?;
-        } else {
-            // 如果禁用了 Claude，删除对应的子供应商
-            let claude_id = format!("universal-claude-{id}");
-            Self::ensure_claude_provider_not_model_routed(state, &claude_id)?;
-            let _ = state.db.delete_provider("claude", &claude_id);
+        } else if claude_existing.is_some() {
+            state.db.delete_provider("claude", &claude_id)?;
         }
 
-        // 同步到 Codex
-        if let Some(mut codex_provider) = provider.to_codex_provider() {
-            // 合并已有配置
-            if let Some(existing) = state.db.get_provider_by_id(&codex_provider.id, "codex")? {
-                let mut merged = existing.settings_config.clone();
+        if let Some(mut codex_provider) = codex_provider {
+            if let Some(existing) = codex_existing {
+                let mut merged = existing.settings_config;
                 Self::merge_json(&mut merged, &codex_provider.settings_config);
                 codex_provider.settings_config = merged;
             }
             state.db.save_provider("codex", &codex_provider)?;
-        } else {
-            let codex_id = format!("universal-codex-{id}");
-            let _ = state.db.delete_provider("codex", &codex_id);
+        } else if codex_existing.is_some() {
+            state.db.delete_provider("codex", &codex_id)?;
         }
 
-        // 同步到 Gemini
-        if let Some(mut gemini_provider) = provider.to_gemini_provider() {
-            // 合并已有配置
-            if let Some(existing) = state.db.get_provider_by_id(&gemini_provider.id, "gemini")? {
-                let mut merged = existing.settings_config.clone();
+        if let Some(mut gemini_provider) = gemini_provider {
+            if let Some(existing) = gemini_existing {
+                let mut merged = existing.settings_config;
                 Self::merge_json(&mut merged, &gemini_provider.settings_config);
                 gemini_provider.settings_config = merged;
             }
             state.db.save_provider("gemini", &gemini_provider)?;
-        } else {
-            let gemini_id = format!("universal-gemini-{id}");
-            let _ = state.db.delete_provider("gemini", &gemini_id);
+        } else if gemini_existing.is_some() {
+            state.db.delete_provider("gemini", &gemini_id)?;
         }
 
         Ok(true)

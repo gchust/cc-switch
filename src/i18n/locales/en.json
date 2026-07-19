@@ -358,8 +358,8 @@
         "description": "Configure failover queue and circuit breaker strategy"
       },
       "modelProviderMapping": {
-        "title": "Claude Model Routing",
-        "description": "Route exact Claude model IDs to selected providers"
+        "title": "Model Routing",
+        "description": "Route exact Claude and Codex model IDs to selected providers"
       },
       "pricing": {
         "title": "Cost Pricing",
@@ -2489,20 +2489,26 @@
   },
   "proxy": {
     "modelProviderMapping": {
-      "description": "When this map is non-empty, Claude requests must exactly match a configured model ID. Matching requests use only the selected provider; unmatched requests fail locally without contacting an upstream provider.",
-      "modelId": "Claude Model ID",
-      "modelPlaceholder": "For example: deepseek-v3.1",
+      "description": {
+        "claude": "When empty, normal provider selection and failover remain active. Once any route is configured, the map becomes a strict exact-match allowlist: matched requests use only the selected provider with no failover, unmatched requests fail locally, and Claude Official routing is unsupported.",
+        "codex": "When empty, normal provider selection and failover remain active. Once any route is configured, the map becomes a strict exact-match allowlist: matched requests use only the selected provider with no failover, and unmatched requests fail locally. Routes reuse the current Codex catalog and client profile (catalogs are not combined), so use compatible third-party providers and start a new session after changing models; OpenAI Official routing is unsupported."
+      },
+      "modelId": "{{app}} Model ID",
+      "modelPlaceholder": {
+        "claude": "For example: claude-sonnet-4-5",
+        "codex": "For example: gpt-5.3-codex"
+      },
       "provider": "Provider",
       "providerPlaceholder": "Select a provider",
       "add": "Add Mapping",
       "empty": "No model routes configured. Existing provider selection remains active.",
-      "saved": "Claude model routes saved",
-      "saveFailed": "Failed to save Claude model routes: {{error}}",
+      "saved": "{{app}} model routes saved",
+      "saveFailed": "Failed to save {{app}} model routes: {{error}}",
       "incomplete": "Complete every model ID and provider before saving.",
       "duplicateModel": "Each model ID can appear only once.",
       "missingProvider": "Missing provider ({{id}})",
-      "loadFailed": "Failed to load Claude model routes. Existing routes were not changed.",
-      "providerLoadFailed": "Failed to load Claude providers. Existing routes were not changed."
+      "loadFailed": "Failed to load {{app}} model routes. Existing routes were not changed.",
+      "providerLoadFailed": "Failed to load {{app}} providers. Existing routes were not changed."
     },
     "panel": {
       "serviceAddress": "Service Address",

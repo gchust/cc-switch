@@ -29,23 +29,26 @@ impl ProviderRouter {
         }
     }
 
-    /// 按 Claude 请求模型精确选择供应商。
+    /// 按 Claude/Codex 请求模型精确选择供应商。
     ///
-    /// 路由表为空时保留现有选择逻辑；一旦配置了任意路由，Claude 请求必须精确命中，
+    /// 路由表为空时保留现有选择逻辑；一旦配置了任意路由，对应应用的请求必须精确命中，
     /// 并且只返回对应的单个供应商，不进入故障转移队列或熔断器探测。
     pub async fn select_providers_for_model(
         &self,
         app_type: &str,
         request_model: &str,
     ) -> Result<(Vec<Provider>, bool), AppError> {
-        if app_type != "claude" {
-            return self
-                .select_providers(app_type)
-                .await
-                .map(|providers| (providers, false));
-        }
+        let (mappings, app_label) = match app_type {
+            "claude" => (self.db.get_claude_model_provider_map()?, "Claude"),
+            "codex" => (self.db.get_codex_model_provider_map()?, "Codex"),
+            _ => {
+                return self
+                    .select_providers(app_type)
+                    .await
+                    .map(|providers| (providers, false));
+            }
+        };
 
-        let mappings = self.db.get_claude_model_provider_map()?;
         if mappings.is_empty() {
             return self
                 .select_providers(app_type)
@@ -54,26 +57,28 @@ impl ProviderRouter {
         }
 
         let provider_id = mappings.get(request_model).ok_or_else(|| {
-            AppError::InvalidInput(format!("Claude 模型未配置本地供应商路由: {request_model}"))
+            AppError::InvalidInput(format!(
+                "{app_label} 模型未配置本地供应商路由: {request_model}"
+            ))
         })?;
         let provider = self
             .db
-            .get_provider_by_id(provider_id, "claude")?
+            .get_provider_by_id(provider_id, app_type)?
             .ok_or_else(|| {
                 AppError::InvalidInput(format!(
-                    "Claude 模型 {request_model} 指向的供应商不存在: {provider_id}"
+                    "{app_label} 模型 {request_model} 指向的供应商不存在: {provider_id}"
                 ))
             })?;
         if provider.category.as_deref() == Some("official")
             || crate::database::is_official_seed_id(provider_id)
         {
             return Err(AppError::InvalidInput(format!(
-                "Claude 模型 {request_model} 不能路由到官方供应商: {provider_id}"
+                "{app_label} 模型 {request_model} 不能路由到官方供应商: {provider_id}"
             )));
         }
 
         log::debug!(
-            "[claude] 模型本地路由命中: model={}, provider={} ({})",
+            "[{app_type}] 模型本地路由命中: model={}, provider={} ({})",
             request_model,
             provider.name,
             provider.id
@@ -375,6 +380,24 @@ mod tests {
                 Some(value) => env::set_var("CC_SWITCH_TEST_HOME", value),
                 None => env::remove_var("CC_SWITCH_TEST_HOME"),
             }
+        }
+    }
+
+    fn test_provider(id: &str) -> Provider {
+        Provider::with_id(id.to_string(), format!("Provider {id}"), json!({}), None)
+    }
+
+    fn set_test_model_route(db: &Database, app_type: &str, model: &str, provider_id: &str) {
+        let mappings =
+            std::collections::BTreeMap::from([(model.to_string(), provider_id.to_string())]);
+        match app_type {
+            "claude" => db
+                .set_claude_model_provider_map(&mappings)
+                .expect("set Claude model route"),
+            "codex" => db
+                .set_codex_model_provider_map(&mappings)
+                .expect("set Codex model route"),
+            _ => panic!("unsupported model-routing app: {app_type}"),
         }
     }
 
@@ -690,6 +713,128 @@ mod tests {
             .await
             .unwrap_err();
 
+        assert!(matches!(error, AppError::InvalidInput(_)));
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_codex_model_route_selects_exact_provider_without_failover() {
+        let _home = TempHome::new();
+        let db = Arc::new(Database::memory().unwrap());
+        db.save_provider("codex", &test_provider("a")).unwrap();
+        db.save_provider("codex", &test_provider("b")).unwrap();
+        db.set_current_provider("codex", "a").unwrap();
+        set_test_model_route(&db, "codex", "gpt-5.4", "b");
+
+        let router = ProviderRouter::new(db);
+        let (providers, model_routed) = router
+            .select_providers_for_model("codex", "gpt-5.4")
+            .await
+            .unwrap();
+
+        assert!(model_routed);
+        assert_eq!(providers.len(), 1);
+        assert_eq!(providers[0].id, "b");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_codex_nonempty_model_route_map_rejects_unmapped_model() {
+        let _home = TempHome::new();
+        let db = Arc::new(Database::memory().unwrap());
+        db.save_provider("codex", &test_provider("a")).unwrap();
+        db.set_current_provider("codex", "a").unwrap();
+        set_test_model_route(&db, "codex", "gpt-5.4", "a");
+
+        let router = ProviderRouter::new(db);
+        let error = router
+            .select_providers_for_model("codex", "GPT-5.4")
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, AppError::InvalidInput(_)));
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_codex_empty_model_route_map_preserves_legacy_selection() {
+        let _home = TempHome::new();
+        let db = Arc::new(Database::memory().unwrap());
+        db.save_provider("codex", &test_provider("a")).unwrap();
+        db.set_current_provider("codex", "a").unwrap();
+
+        let router = ProviderRouter::new(db);
+        let (providers, model_routed) = router
+            .select_providers_for_model("codex", "gpt-5.4")
+            .await
+            .unwrap();
+
+        assert!(!model_routed);
+        assert_eq!(providers[0].id, "a");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_codex_model_route_rejects_official_provider() {
+        let _home = TempHome::new();
+        let db = Arc::new(Database::memory().unwrap());
+        let mut provider = test_provider("managed-official");
+        provider.category = Some("official".to_string());
+        db.save_provider("codex", &provider).unwrap();
+        set_test_model_route(&db, "codex", "gpt-5.4", "managed-official");
+
+        let router = ProviderRouter::new(db);
+        let error = router
+            .select_providers_for_model("codex", "gpt-5.4")
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, AppError::InvalidInput(_)));
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_codex_model_route_rejects_any_official_seed_id() {
+        let _home = TempHome::new();
+        let db = Arc::new(Database::memory().unwrap());
+        db.save_provider("codex", &test_provider("claude-official"))
+            .unwrap();
+        set_test_model_route(&db, "codex", "gpt-5.4", "claude-official");
+
+        let router = ProviderRouter::new(db);
+        let error = router
+            .select_providers_for_model("codex", "gpt-5.4")
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, AppError::InvalidInput(_)));
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_codex_model_routing_is_isolated_from_claude() {
+        let _home = TempHome::new();
+        let db = Arc::new(Database::memory().unwrap());
+        db.save_provider("claude", &test_provider("shared-id"))
+            .unwrap();
+        db.save_provider("codex", &test_provider("codex-current"))
+            .unwrap();
+        db.set_current_provider("codex", "codex-current").unwrap();
+        set_test_model_route(&db, "claude", "shared-model", "shared-id");
+
+        let router = ProviderRouter::new(db.clone());
+        let (providers, model_routed) = router
+            .select_providers_for_model("codex", "shared-model")
+            .await
+            .unwrap();
+        assert!(!model_routed);
+        assert_eq!(providers[0].id, "codex-current");
+
+        set_test_model_route(&db, "codex", "shared-model", "shared-id");
+        let error = router
+            .select_providers_for_model("codex", "shared-model")
+            .await
+            .unwrap_err();
         assert!(matches!(error, AppError::InvalidInput(_)));
     }
 }

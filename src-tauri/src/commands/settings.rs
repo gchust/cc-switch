@@ -314,12 +314,15 @@ pub async fn set_auto_launch(enabled: bool) -> Result<bool, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::merge_settings_for_save;
+    use super::{merge_settings_for_save, validate_model_provider_mappings};
+    use crate::database::Database;
+    use crate::provider::Provider;
     use crate::settings::{
         AppSettings, CodexOfficialHistoryUnifyMigration, CodexProviderTemplateMigration,
         CodexThirdPartyHistoryProviderBucketMigration, LocalMigrations, S3SyncSettings,
         WebDavSyncSettings,
     };
+    use std::collections::BTreeMap;
 
     #[test]
     fn save_settings_should_preserve_existing_webdav_when_payload_omits_it() {
@@ -618,12 +621,151 @@ mod tests {
 
         assert!(merged.local_migrations.is_none());
     }
+
+    #[test]
+    fn model_provider_mapping_validation_accepts_app_scoped_custom_provider() {
+        let db = Database::memory().expect("memory database");
+        let provider = Provider::with_id(
+            "codex-custom".to_string(),
+            "Codex Custom".to_string(),
+            serde_json::json!({}),
+            None,
+        );
+        db.save_provider("codex", &provider)
+            .expect("save Codex provider");
+        let mappings = BTreeMap::from([("gpt-5.4".to_string(), "codex-custom".to_string())]);
+
+        validate_model_provider_mappings(&db, "codex", &mappings)
+            .expect("valid mapping should pass");
+    }
+
+    #[test]
+    fn model_provider_mapping_validation_rejects_any_official_seed_id() {
+        let db = Database::memory().expect("memory database");
+        let provider = Provider::with_id(
+            "claude-official".to_string(),
+            "Codex Provider With Reserved ID".to_string(),
+            serde_json::json!({}),
+            None,
+        );
+        db.save_provider("codex", &provider)
+            .expect("save app-scoped provider");
+        let mappings = BTreeMap::from([("gpt-5.4".to_string(), "claude-official".to_string())]);
+
+        let error = validate_model_provider_mappings(&db, "codex", &mappings)
+            .expect_err("official seed IDs stay reserved across apps");
+
+        assert!(error.contains("官方供应商"));
+    }
+
+    #[test]
+    fn model_provider_mapping_validation_rejects_empty_or_non_exact_model_id() {
+        let db = Database::memory().expect("memory database");
+
+        for model_id in ["", " gpt-5.4", "gpt-5.4 "] {
+            let mappings = BTreeMap::from([(model_id.to_string(), "codex-custom".to_string())]);
+            validate_model_provider_mappings(&db, "codex", &mappings)
+                .expect_err("empty or whitespace-padded model ID should fail");
+        }
+    }
+
+    #[test]
+    fn model_provider_mapping_validation_uses_app_scoped_provider_lookup() {
+        let db = Database::memory().expect("memory database");
+        let provider = Provider::with_id(
+            "shared-id".to_string(),
+            "Claude Provider".to_string(),
+            serde_json::json!({}),
+            None,
+        );
+        db.save_provider("claude", &provider)
+            .expect("save Claude provider");
+        let mappings = BTreeMap::from([("gpt-5.4".to_string(), "shared-id".to_string())]);
+
+        let error = validate_model_provider_mappings(&db, "codex", &mappings)
+            .expect_err("provider from another app should fail");
+
+        assert!(error.contains("Codex"));
+        assert!(error.contains("不存在"));
+    }
+
+    #[test]
+    fn model_provider_mapping_validation_rejects_official_providers() {
+        let db = Database::memory().expect("memory database");
+        let mut categorized = Provider::with_id(
+            "official-category".to_string(),
+            "Official Category".to_string(),
+            serde_json::json!({}),
+            None,
+        );
+        categorized.category = Some("official".to_string());
+        db.save_provider("codex", &categorized)
+            .expect("save categorized official provider");
+        let seed_id = Provider::with_id(
+            "codex-official".to_string(),
+            "Official Seed ID".to_string(),
+            serde_json::json!({}),
+            None,
+        );
+        db.save_provider("codex", &seed_id)
+            .expect("save official seed id provider");
+
+        for provider_id in ["official-category", "codex-official"] {
+            let mappings = BTreeMap::from([("gpt-5.4".to_string(), provider_id.to_string())]);
+            let error = validate_model_provider_mappings(&db, "codex", &mappings)
+                .expect_err("official provider should fail");
+            assert!(error.contains("官方供应商"));
+        }
+    }
 }
 
 /// 获取开机自启状态
 #[tauri::command]
 pub async fn get_auto_launch_status() -> Result<bool, String> {
     crate::auto_launch::is_auto_launch_enabled().map_err(|e| format!("获取开机自启状态失败: {e}"))
+}
+
+fn validate_model_provider_mappings(
+    db: &crate::Database,
+    app_type: &str,
+    mappings: &std::collections::BTreeMap<String, String>,
+) -> Result<(), String> {
+    let app_label = match app_type {
+        "claude" => "Claude",
+        "codex" => "Codex",
+        _ => app_type,
+    };
+
+    let mut provider_models = std::collections::BTreeMap::new();
+    for (model_id, provider_id) in mappings {
+        if model_id.trim().is_empty() {
+            return Err(format!("{app_label} 模型 ID 不能为空"));
+        }
+        if model_id.trim() != model_id {
+            return Err(format!("{app_label} 模型 ID 不能包含首尾空格: {model_id}"));
+        }
+        provider_models
+            .entry(provider_id.as_str())
+            .or_insert(model_id.as_str());
+    }
+
+    for (provider_id, model_id) in provider_models {
+        let provider = db
+            .get_provider_by_id(provider_id, app_type)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| {
+                format!("{app_label} 模型 {model_id} 指向的供应商不存在: {provider_id}")
+            })?;
+        if provider.category.as_deref() == Some("official")
+            || crate::database::is_official_seed_id(provider_id)
+        {
+            return Err(format!(
+                "{app_label} 模型 {model_id} 不能路由到官方供应商: {provider_id}"
+            ));
+        }
+    }
+
+    Ok(())
 }
 
 /// 获取 Claude 模型到供应商的精确路由表
@@ -643,31 +785,37 @@ pub async fn set_claude_model_provider_map(
     state: tauri::State<'_, crate::AppState>,
     mappings: std::collections::BTreeMap<String, String>,
 ) -> Result<bool, String> {
-    for (model_id, provider_id) in &mappings {
-        if model_id.trim().is_empty() {
-            return Err("Claude 模型 ID 不能为空".to_string());
-        }
-        if model_id.trim() != model_id {
-            return Err(format!("Claude 模型 ID 不能包含首尾空格: {model_id}"));
-        }
-
-        let provider = state
-            .db
-            .get_provider_by_id(provider_id, "claude")
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| format!("Claude 模型 {model_id} 指向的供应商不存在: {provider_id}"))?;
-        if provider.category.as_deref() == Some("official")
-            || crate::database::is_official_seed_id(provider_id)
-        {
-            return Err(format!(
-                "Claude 模型 {model_id} 不能路由到官方供应商: {provider_id}"
-            ));
-        }
-    }
+    validate_model_provider_mappings(&state.db, "claude", &mappings)?;
 
     state
         .db
         .set_claude_model_provider_map(&mappings)
+        .map_err(|e| e.to_string())?;
+    Ok(true)
+}
+
+/// 获取 Codex 模型到供应商的精确路由表
+#[tauri::command]
+pub async fn get_codex_model_provider_map(
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<std::collections::BTreeMap<String, String>, String> {
+    state
+        .db
+        .get_codex_model_provider_map()
+        .map_err(|e| e.to_string())
+}
+
+/// 设置 Codex 模型到供应商的精确路由表
+#[tauri::command]
+pub async fn set_codex_model_provider_map(
+    state: tauri::State<'_, crate::AppState>,
+    mappings: std::collections::BTreeMap<String, String>,
+) -> Result<bool, String> {
+    validate_model_provider_mappings(&state.db, "codex", &mappings)?;
+
+    state
+        .db
+        .set_codex_model_provider_map(&mappings)
         .map_err(|e| e.to_string())?;
     Ok(true)
 }
