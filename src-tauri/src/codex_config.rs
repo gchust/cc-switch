@@ -141,12 +141,11 @@ pub enum CodexCatalogToolProfile {
     Anthropic,
 }
 
-/// One provider-scoped slice of a merged routing catalog. `settings` contains
-/// only the routed rows that should be projected from that provider, while the
-/// provider's own config/profile still controls context defaults and tool
-/// compatibility for those rows.
+/// One provider-scoped slice of the merged catalog. `settings` contains that
+/// provider's visible catalog rows, including any route-only aliases, while
+/// its own config/profile controls context defaults and tool compatibility.
 #[derive(Debug, Clone)]
-pub(crate) struct CodexRoutedCatalogSource {
+pub(crate) struct CodexMergedCatalogSource {
     pub settings: Value,
     pub config_text: String,
     pub profile: CodexCatalogToolProfile,
@@ -1047,11 +1046,11 @@ pub fn prepare_codex_config_text_with_model_catalog(
     }
 }
 
-/// Generate one Codex catalog from model rows owned by different routed
-/// providers. Each source is rendered with its own tool profile, then the
-/// resulting entries are merged into the single catalog file Codex supports.
-pub(crate) fn codex_routed_model_catalog_from_sources(
-    sources: &[CodexRoutedCatalogSource],
+/// Generate one Codex catalog from model rows owned by different providers.
+/// Each source is rendered with its own tool profile, then the resulting
+/// entries are merged into the single catalog file Codex supports.
+pub(crate) fn codex_merged_model_catalog_from_sources(
+    sources: &[CodexMergedCatalogSource],
 ) -> Result<(Value, bool), AppError> {
     let mut seen = HashSet::new();
     let mut merged_models = Vec::new();
@@ -1103,12 +1102,12 @@ pub(crate) fn codex_routed_model_catalog_from_sources(
     Ok((json!({ "models": merged_models }), disable_web_search))
 }
 
-pub(crate) fn project_codex_config_text_with_routed_model_catalog(
+pub(crate) fn project_codex_config_text_with_merged_model_catalog(
     config_text: &str,
-    sources: &[CodexRoutedCatalogSource],
+    sources: &[CodexMergedCatalogSource],
 ) -> Result<String, AppError> {
     let catalog_path = get_codex_model_catalog_path();
-    let (catalog, disable_web_search) = codex_routed_model_catalog_from_sources(sources)?;
+    let (catalog, disable_web_search) = codex_merged_model_catalog_from_sources(sources)?;
     let config_text = set_codex_model_catalog_json_field(config_text, Some(&catalog_path))?;
     let config_text = set_codex_native_web_search_field(&config_text, disable_web_search)?;
     write_json_file(&catalog_path, &catalog)?;
@@ -3242,8 +3241,8 @@ web_search = "disabled"
     }
 
     #[test]
-    fn routed_catalog_disables_web_search_for_a_reject_model_on_neutral_gateway() {
-        let source = CodexRoutedCatalogSource {
+    fn merged_catalog_disables_web_search_for_a_reject_model_on_neutral_gateway() {
+        let source = CodexMergedCatalogSource {
             settings: json!({
                 "modelCatalog": {
                     "models": [{ "model": "qwen/qwen3-coder-plus" }]
@@ -3260,7 +3259,7 @@ wire_api = "responses"
             profile: CodexCatalogToolProfile::NativeResponses,
         };
 
-        let (_, disable_web_search) = codex_routed_model_catalog_from_sources(&[source])
+        let (_, disable_web_search) = codex_merged_model_catalog_from_sources(&[source])
             .expect("build routed native catalog");
 
         assert!(

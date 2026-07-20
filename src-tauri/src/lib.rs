@@ -1064,6 +1064,20 @@ pub fn run() {
 
                 initialize_common_config_snippets(&state);
 
+                // Model visibility is provider-owned rather than route-owned:
+                // rebuild the shared Codex catalog on every startup so providers
+                // configured before this version become visible without requiring
+                // a manual edit, switch, or model-route save first.
+                {
+                    let _catalog_guard =
+                        crate::services::provider::lock_codex_model_catalog_projection();
+                    if let Err(e) = crate::services::provider::refresh_codex_model_catalog_projection_unlocked(
+                        state.db.as_ref(),
+                    ) {
+                        log::warn!("启动时刷新 Codex 合并模型目录失败: {e}");
+                    }
+                }
+
                 // 检查 settings 表中的代理状态，自动恢复代理服务
                 restore_proxy_state_on_startup(&state).await;
 

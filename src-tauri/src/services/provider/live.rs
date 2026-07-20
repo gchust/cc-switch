@@ -2,7 +2,7 @@
 //!
 //! Handles reading and writing live configuration files for Claude, Codex, and Gemini.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use serde_json::{json, Value};
@@ -782,35 +782,65 @@ fn codex_routed_model_config(provider: &Provider, route_model: &str) -> Value {
     model
 }
 
-pub(crate) fn build_codex_routed_catalog_sources(
-    db: &Database,
-) -> Result<Vec<crate::codex_config::CodexRoutedCatalogSource>, AppError> {
-    let mappings = db.get_codex_model_provider_map()?;
-    if mappings.is_empty() {
-        return Ok(Vec::new());
-    }
+fn codex_provider_catalog_models(
+    provider: &Provider,
+    provider_id: &str,
+    route_owners: &BTreeMap<String, String>,
+) -> Vec<Value> {
+    provider
+        .settings_config
+        .pointer("/modelCatalog/models")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|model| {
+            model
+                .get("model")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|model| !model.is_empty())
+                .is_some_and(|model| {
+                    route_owners
+                        .get(model)
+                        .is_none_or(|route_provider_id| route_provider_id == provider_id)
+                })
+        })
+        .cloned()
+        .collect()
+}
 
+pub(crate) fn build_codex_merged_catalog_sources(
+    db: &Database,
+) -> Result<Vec<crate::codex_config::CodexMergedCatalogSource>, AppError> {
+    let mappings = db.get_codex_model_provider_map()?;
+    let route_owners = mappings.clone();
     let mut provider_models: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for (model, provider_id) in mappings {
         provider_models.entry(provider_id).or_default().push(model);
     }
 
     let mut sources = Vec::new();
-    for (provider_id, route_models) in provider_models {
-        let provider = db
-            .get_provider_by_id(&provider_id, AppType::Codex.as_str())?
-            .ok_or_else(|| {
-                AppError::Config(format!(
-                    "Codex model route references missing provider: {provider_id}"
-                ))
-            })?;
+    for (provider_id, provider) in db.get_all_providers(AppType::Codex.as_str())? {
+        let route_models = provider_models.remove(&provider_id).unwrap_or_default();
         let mut effective_provider = provider.clone();
         effective_provider.settings_config =
             build_effective_settings_with_common_config(db, &AppType::Codex, &provider)?;
-        let models = route_models
+        let mut models =
+            codex_provider_catalog_models(&effective_provider, &provider_id, &route_owners);
+        let mut seen = models
             .iter()
-            .map(|model| codex_routed_model_config(&effective_provider, model))
-            .collect::<Vec<_>>();
+            .filter_map(|model| model.get("model").and_then(Value::as_str))
+            .map(str::trim)
+            .map(str::to_string)
+            .collect::<HashSet<_>>();
+        for model in route_models {
+            if seen.insert(model.clone()) {
+                models.push(codex_routed_model_config(&effective_provider, &model));
+            }
+        }
+        if models.is_empty() {
+            continue;
+        }
         let config_text = effective_provider
             .settings_config
             .get("config")
@@ -818,13 +848,19 @@ pub(crate) fn build_codex_routed_catalog_sources(
             .unwrap_or("")
             .to_string();
 
-        sources.push(crate::codex_config::CodexRoutedCatalogSource {
+        sources.push(crate::codex_config::CodexMergedCatalogSource {
             settings: json!({ "modelCatalog": { "models": models } }),
             config_text,
             profile: crate::proxy::providers::resolve_codex_catalog_tool_profile(
                 &effective_provider,
             ),
         });
+    }
+
+    if let Some((provider_id, _)) = provider_models.into_iter().next() {
+        return Err(AppError::Config(format!(
+            "Codex model route references missing provider: {provider_id}"
+        )));
     }
 
     Ok(sources)
@@ -836,7 +872,7 @@ pub(crate) fn prepare_codex_config_text_with_model_catalog_projection(
     config_text: &str,
     profile: crate::codex_config::CodexCatalogToolProfile,
 ) -> Result<String, AppError> {
-    let sources = build_codex_routed_catalog_sources(db)?;
+    let sources = build_codex_merged_catalog_sources(db)?;
     if sources.is_empty() {
         crate::codex_config::prepare_codex_config_text_with_model_catalog(
             settings,
@@ -844,7 +880,7 @@ pub(crate) fn prepare_codex_config_text_with_model_catalog_projection(
             profile,
         )
     } else {
-        crate::codex_config::project_codex_config_text_with_routed_model_catalog(
+        crate::codex_config::project_codex_config_text_with_merged_model_catalog(
             config_text,
             &sources,
         )
@@ -857,7 +893,7 @@ pub(crate) fn prepare_codex_live_config_text_with_optional_catalog_projection(
     config_text: &str,
     profile: crate::codex_config::CodexCatalogToolProfile,
 ) -> Result<String, AppError> {
-    let sources = build_codex_routed_catalog_sources(db)?;
+    let sources = build_codex_merged_catalog_sources(db)?;
     if sources.is_empty() {
         crate::codex_config::prepare_codex_live_config_text_with_optional_catalog(
             settings,
@@ -865,7 +901,7 @@ pub(crate) fn prepare_codex_live_config_text_with_optional_catalog_projection(
             profile,
         )
     } else {
-        crate::codex_config::project_codex_config_text_with_routed_model_catalog(
+        crate::codex_config::project_codex_config_text_with_merged_model_catalog(
             config_text,
             &sources,
         )
@@ -893,16 +929,17 @@ pub(crate) fn write_codex_provider_live_with_catalog_projection(
     crate::codex_config::write_codex_live_for_provider(category, auth, prepared_config.as_deref())
 }
 
-/// Re-project the single Codex catalog from all providers referenced by the
-/// exact model routing table. Returns false when routing is disabled.
-pub(crate) fn project_codex_routed_model_catalog(db: &Database) -> Result<bool, AppError> {
-    let sources = build_codex_routed_catalog_sources(db)?;
+/// Re-project the single Codex catalog from every provider-owned model catalog,
+/// plus aliases synthesized by the exact model routing table. Returns false
+/// only when neither configured catalogs nor routed aliases exist.
+pub(crate) fn project_codex_merged_model_catalog(db: &Database) -> Result<bool, AppError> {
+    let sources = build_codex_merged_catalog_sources(db)?;
     if sources.is_empty() {
         return Ok(false);
     }
 
     let config_text = crate::codex_config::read_and_validate_codex_config_text()?;
-    let config_text = crate::codex_config::project_codex_config_text_with_routed_model_catalog(
+    let config_text = crate::codex_config::project_codex_config_text_with_merged_model_catalog(
         &config_text,
         &sources,
     )?;
@@ -945,7 +982,7 @@ pub(crate) fn project_current_codex_provider_catalog(db: &Database) -> Result<bo
 pub(crate) fn refresh_codex_model_catalog_projection_unlocked(
     db: &Database,
 ) -> Result<bool, AppError> {
-    if project_codex_routed_model_catalog(db)? {
+    if project_codex_merged_model_catalog(db)? {
         Ok(true)
     } else {
         project_current_codex_provider_catalog(db)
@@ -2266,7 +2303,7 @@ mod tests {
 
     #[test]
     #[serial]
-    fn codex_routed_catalog_merges_targets_and_survives_provider_switches() {
+    fn codex_catalog_merges_all_provider_models_and_routed_aliases() {
         let _home = CodexProjectionTestHome::new();
         let db = Database::memory().expect("create memory db");
         db.set_config_snippet(
@@ -2280,11 +2317,18 @@ mod tests {
             "openai_chat",
             "chat-upstream",
             0,
-            vec![json!({
-                "model": "chat-unused",
-                "displayName": "Chat unused",
-                "contextWindow": 64_000
-            })],
+            vec![
+                json!({
+                    "model": "chat-unused",
+                    "displayName": "Chat unused",
+                    "contextWindow": 64_000
+                }),
+                json!({
+                    "model": "native-special",
+                    "displayName": "Wrong duplicate owner",
+                    "contextWindow": 64_000
+                }),
+            ],
             true,
         );
         let native = codex_projection_test_provider(
@@ -2336,11 +2380,11 @@ mod tests {
         crate::settings::set_current_provider(&AppType::Codex, Some(&chat.id))
             .expect("persist chat provider selection");
         write_live_with_common_config(&db, &AppType::Codex, &chat)
-            .expect("write chat provider with routed catalog");
+            .expect("write chat provider with merged catalog");
 
         let first_catalog: Value =
             read_json_file(&crate::codex_config::get_codex_model_catalog_path())
-                .expect("read first routed catalog");
+                .expect("read first merged catalog");
         let first_models = first_catalog["models"]
             .as_array()
             .expect("first routed model array");
@@ -2350,8 +2394,18 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             first_slugs,
-            vec!["chat-alias", "native-special", "claude-alias"],
-            "only explicitly routed models should be exposed"
+            vec![
+                "chat-upstream",
+                "chat-unused",
+                "chat-alias",
+                "native-upstream",
+                "native-special",
+                "native-unused",
+                "claude-upstream",
+                "claude-unused",
+                "claude-alias",
+            ],
+            "every provider catalog should be exposed, with routed aliases added"
         );
 
         let model = |slug: &str| {
@@ -2415,14 +2469,14 @@ mod tests {
         crate::settings::set_current_provider(&AppType::Codex, Some(&native.id))
             .expect("persist native provider selection");
         write_live_with_common_config(&db, &AppType::Codex, &native)
-            .expect("switch provider without replacing routed catalog");
+            .expect("switch provider without replacing merged catalog");
 
         let second_catalog: Value =
             read_json_file(&crate::codex_config::get_codex_model_catalog_path())
-                .expect("read routed catalog after switch");
+                .expect("read merged catalog after switch");
         assert_eq!(
             second_catalog, first_catalog,
-            "provider switching must not replace the route-owned catalog"
+            "provider switching must not replace the provider-owned merged catalog"
         );
         let second_config = crate::codex_config::read_and_validate_codex_config_text()
             .expect("read projected config after switch");
@@ -2458,8 +2512,16 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             restored_slugs,
-            vec!["native-upstream", "native-special", "native-unused"],
-            "clearing routes should restore the current provider's full catalog"
+            vec![
+                "chat-upstream",
+                "chat-unused",
+                "native-special",
+                "native-upstream",
+                "native-unused",
+                "claude-upstream",
+                "claude-unused",
+            ],
+            "clearing routes should keep every configured provider catalog visible"
         );
         let restored_config = crate::codex_config::read_and_validate_codex_config_text()
             .expect("read config after clearing routes");
@@ -2472,9 +2534,73 @@ mod tests {
             Some("provider-b-native"),
             "restoring the current catalog must preserve provider selection"
         );
-        assert!(
-            restored_toml.get("web_search").is_none(),
-            "the route-owned Anthropic web-search guard should be removed after routes are cleared"
+        assert_eq!(
+            restored_toml
+                .get("web_search")
+                .and_then(toml::Value::as_str),
+            Some("disabled"),
+            "the visible Anthropic catalog should keep the global web-search safety guard"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn codex_catalog_includes_non_current_provider_without_model_routes() {
+        let _home = CodexProjectionTestHome::new();
+        let db = Database::memory().expect("create memory db");
+
+        let mut current = codex_projection_test_provider(
+            "a-current",
+            "openai_responses",
+            "gpt-current",
+            128_000,
+            Vec::new(),
+            false,
+        );
+        current
+            .settings_config
+            .as_object_mut()
+            .expect("current settings object")
+            .remove("modelCatalog");
+        let grok = codex_projection_test_provider(
+            "b-grok",
+            "openai_responses",
+            "grok-4.5",
+            256_000,
+            Vec::new(),
+            false,
+        );
+
+        for provider in [&current, &grok] {
+            db.save_provider(AppType::Codex.as_str(), provider)
+                .expect("save Codex provider");
+        }
+        db.set_current_provider(AppType::Codex.as_str(), &current.id)
+            .expect("select current provider");
+        crate::settings::set_current_provider(&AppType::Codex, Some(&current.id))
+            .expect("persist current provider selection");
+
+        write_live_with_common_config(&db, &AppType::Codex, &current)
+            .expect("write current provider with merged catalog");
+
+        let catalog: Value = read_json_file(&crate::codex_config::get_codex_model_catalog_path())
+            .expect("read merged catalog");
+        let slugs = catalog["models"]
+            .as_array()
+            .expect("merged model array")
+            .iter()
+            .filter_map(|model| model.get("slug").and_then(Value::as_str))
+            .collect::<Vec<_>>();
+        assert_eq!(slugs, vec!["grok-4.5"]);
+
+        let config = crate::codex_config::read_and_validate_codex_config_text()
+            .expect("read projected config");
+        let config: toml::Value = toml::from_str(&config).expect("parse projected config");
+        assert_eq!(
+            config
+                .get("model_catalog_json")
+                .and_then(toml::Value::as_str),
+            Some(crate::codex_config::CC_SWITCH_CODEX_MODEL_CATALOG_FILENAME)
         );
     }
 
