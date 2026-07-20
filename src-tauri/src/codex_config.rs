@@ -486,6 +486,43 @@ fn codex_catalog_input_modalities(
     modalities.iter().map(|item| (*item).to_string()).collect()
 }
 
+fn codex_catalog_apply_known_reasoning_profile(
+    model: &str,
+    entry_obj: &mut serde_json::Map<String, Value>,
+) {
+    let normalized = model
+        .rsplit('/')
+        .next()
+        .unwrap_or(model)
+        .trim()
+        .to_ascii_lowercase();
+
+    // xAI documents Grok 4.5 as always-on reasoning with exactly three
+    // supported effort levels. Keep this model-specific capability narrower
+    // than the permissive native-provider template, which intentionally
+    // exposes every common effort value for otherwise unknown models.
+    if matches!(normalized.as_str(), "grok-4.5" | "grok-4.5-latest") {
+        entry_obj.insert("default_reasoning_level".to_string(), json!("high"));
+        entry_obj.insert(
+            "supported_reasoning_levels".to_string(),
+            json!([
+                {
+                    "effort": "low",
+                    "description": "Fast responses with lighter reasoning"
+                },
+                {
+                    "effort": "medium",
+                    "description": "More thinking for complex analysis"
+                },
+                {
+                    "effort": "high",
+                    "description": "Deeper thinking for challenging problems"
+                }
+            ]),
+        );
+    }
+}
+
 fn codex_catalog_model_entry(
     template: &Value,
     spec: &CodexCatalogModelSpec,
@@ -507,6 +544,7 @@ fn codex_catalog_model_entry(
     entry_obj.insert("service_tiers".to_string(), json!([]));
     entry_obj.insert("availability_nux".to_string(), Value::Null);
     entry_obj.insert("upgrade".to_string(), Value::Null);
+    codex_catalog_apply_known_reasoning_profile(&spec.model, entry_obj);
 
     // Image support is a model capability, not a tool-profile capability.
     // Trust hidden preset metadata first, then the confirmed text-only registry;
@@ -2958,6 +2996,45 @@ base_url = "https://production.api/v1"
         assert_eq!(
             entry.get("context_window").and_then(|v| v.as_u64()),
             Some(1_000_000)
+        );
+        let efforts = entry["supported_reasoning_levels"]
+            .as_array()
+            .expect("native reasoning levels")
+            .iter()
+            .filter_map(|level| level.get("effort").and_then(Value::as_str))
+            .collect::<Vec<_>>();
+        assert_eq!(efforts, vec!["none", "low", "medium", "high", "xhigh"]);
+        assert_eq!(
+            entry.get("default_reasoning_level").and_then(Value::as_str),
+            Some("high")
+        );
+    }
+
+    #[test]
+    fn grok_4_5_uses_official_reasoning_effort_levels() {
+        let settings = json!({
+            "modelCatalog": { "models": [{ "model": "grok-4.5" }] }
+        });
+
+        let catalog = codex_model_catalog_from_settings(
+            &settings,
+            "",
+            CodexCatalogToolProfile::NativeResponses,
+        )
+        .expect("Grok catalog generation should not error")
+        .expect("Grok modelCatalog must yield a catalog");
+        let entry = &catalog["models"][0];
+        let efforts = entry["supported_reasoning_levels"]
+            .as_array()
+            .expect("Grok reasoning levels")
+            .iter()
+            .filter_map(|level| level.get("effort").and_then(Value::as_str))
+            .collect::<Vec<_>>();
+
+        assert_eq!(efforts, vec!["low", "medium", "high"]);
+        assert_eq!(
+            entry.get("default_reasoning_level").and_then(Value::as_str),
+            Some("high")
         );
     }
 
