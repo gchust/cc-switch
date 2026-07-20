@@ -6725,18 +6725,25 @@ requires_openai_auth = true
             "restore must preserve the model_catalog_json pointer, got:\n{restored}"
         );
         assert!(
-            restored.contains(pointer.as_str()),
-            "restored pointer must still reference the cc-switch generated catalog file"
+            restored.contains(crate::codex_config::CC_SWITCH_CODEX_MODEL_CATALOG_FILENAME),
+            "restored pointer must reference the regenerated cc-switch catalog file"
         );
         assert!(
             !db.is_codex_model_provider_map_configured()
                 .expect("read route configured state"),
             "this regression covers the no-DB-owner snapshot restore path"
         );
-        assert_eq!(
-            std::fs::read_to_string(&catalog_path).expect("read preserved catalog"),
-            r#"{"models":[{"slug":"deepseek-v4-flash"}]}"#
-        );
+        let catalog: Value = serde_json::from_str(
+            &std::fs::read_to_string(&catalog_path).expect("read regenerated catalog"),
+        )
+        .expect("parse regenerated catalog");
+        let slugs = catalog["models"]
+            .as_array()
+            .expect("official models")
+            .iter()
+            .filter_map(|model| model.get("slug").and_then(Value::as_str))
+            .collect::<Vec<_>>();
+        assert!(slugs.contains(&"gpt-5.5"));
     }
 
     /// Regression: clearing the routing table during takeover must remain
@@ -6783,12 +6790,29 @@ requires_openai_auth = true
         let restored = std::fs::read_to_string(crate::codex_config::get_codex_config_path())
             .expect("read restored config.toml");
         let restored: toml::Value = toml::from_str(&restored).expect("parse restored config");
-        assert!(restored.get("model_catalog_json").is_none());
+        assert_eq!(
+            restored
+                .get("model_catalog_json")
+                .and_then(toml::Value::as_str),
+            Some(crate::codex_config::CC_SWITCH_CODEX_MODEL_CATALOG_FILENAME)
+        );
         assert!(restored.get("web_search").is_none());
         assert_eq!(
             restored.get("model_provider").and_then(toml::Value::as_str),
             Some("custom")
         );
+        let catalog: Value = serde_json::from_str(
+            &std::fs::read_to_string(&catalog_path).expect("read official catalog"),
+        )
+        .expect("parse official catalog");
+        let slugs = catalog["models"]
+            .as_array()
+            .expect("official models")
+            .iter()
+            .filter_map(|model| model.get("slug").and_then(Value::as_str))
+            .collect::<Vec<_>>();
+        assert!(slugs.contains(&"gpt-5.5"));
+        assert!(!slugs.contains(&"stale-route"));
     }
 
     /// Regression: a hot-switch during takeover rebuilds the backup from the DB

@@ -1227,11 +1227,16 @@ requires_openai_auth = true
 
         let catalog_path = crate::codex_config::get_codex_model_catalog_path();
         let catalog: Value = read_json_file(&catalog_path).expect("read generated catalog");
-        assert_eq!(catalog["models"][0]["slug"], "gpt-5.4");
+        let gpt_5_4 = catalog["models"]
+            .as_array()
+            .expect("model array")
+            .iter()
+            .find(|model| model.get("slug").and_then(Value::as_str) == Some("gpt-5.4"))
+            .expect("official gpt-5.4 model");
         assert_eq!(
-            catalog["models"][0]["input_modalities"],
+            gpt_5_4["input_modalities"],
             json!(["text", "image"]),
-            "unknown/GPT models must fail open to image input"
+            "the official GPT catalog entry should preserve image input"
         );
         let live_config = fs::read_to_string(crate::codex_config::get_codex_config_path())
             .expect("read Codex config.toml");
@@ -1244,8 +1249,8 @@ requires_openai_auth = true
         let live_config = fs::read_to_string(crate::codex_config::get_codex_config_path())
             .expect("read Codex config.toml after mapping removal");
         assert!(
-            !live_config.contains("model_catalog_json"),
-            "removing mappings during takeover must clear the stale catalog pointer"
+            live_config.contains("model_catalog_json"),
+            "removing provider mappings must retain the official catalog pointer"
         );
 
         state
@@ -2052,7 +2057,11 @@ requires_openai_auth = true
             .expect("add non-current catalog provider");
         let catalog: Value = read_json_file(&crate::codex_config::get_codex_model_catalog_path())
             .expect("read catalog after add");
-        assert_eq!(catalog["models"][0]["slug"], "grok-4.5");
+        assert!(catalog["models"]
+            .as_array()
+            .expect("model array")
+            .iter()
+            .any(|model| model.get("slug").and_then(Value::as_str) == Some("grok-4.5")));
         let live = crate::codex_config::read_and_validate_codex_config_text()
             .expect("read live config after add");
         assert!(live.contains("model_catalog_json"));
@@ -2070,13 +2079,25 @@ requires_openai_auth = true
             .iter()
             .filter_map(|model| model.get("slug").and_then(Value::as_str))
             .collect::<Vec<_>>();
-        assert_eq!(slugs, vec!["grok-4.6"]);
+        assert!(slugs.contains(&"gpt-5.5"));
+        assert!(slugs.contains(&"grok-4.6"));
+        assert!(!slugs.contains(&"grok-4.5"));
 
         ProviderService::delete(&state, AppType::Codex, &grok.id)
             .expect("delete non-current catalog provider");
         let live = crate::codex_config::read_and_validate_codex_config_text()
             .expect("read live config after delete");
-        assert!(!live.contains("model_catalog_json"));
+        assert!(live.contains("model_catalog_json"));
+        let catalog: Value = read_json_file(&crate::codex_config::get_codex_model_catalog_path())
+            .expect("read official catalog after delete");
+        let slugs = catalog["models"]
+            .as_array()
+            .expect("model array")
+            .iter()
+            .filter_map(|model| model.get("slug").and_then(Value::as_str))
+            .collect::<Vec<_>>();
+        assert!(slugs.contains(&"gpt-5.5"));
+        assert!(!slugs.contains(&"grok-4.6"));
     }
 
     #[test]

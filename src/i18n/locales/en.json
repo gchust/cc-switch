@@ -2491,7 +2491,7 @@
     "modelProviderMapping": {
       "description": {
         "claude": "When empty, normal provider selection and failover remain active. Once any route is configured, the map becomes a strict exact-match allowlist: matched requests use only the selected provider with no failover, unmatched requests fail locally, and Claude Official routing is unsupported.",
-        "codex": "Configured model catalogs from every Codex provider are automatically combined into /model, whether or not routes are configured. When empty, normal provider selection and failover remain active. Once any route is configured, the map becomes a strict exact-match allowlist: matched requests use only the selected provider with no failover, and unmatched requests fail locally. Use compatible third-party providers and start a new session after changing models; OpenAI Official routing is unsupported."
+        "codex": "Official Codex models always form the base /model catalog, and configured model catalogs from third-party Codex providers are automatically merged into it whether or not routes are configured. When empty, normal provider selection and failover remain active. Once any route is configured, the map becomes a strict exact-match allowlist: matched requests use only the selected provider with no failover, and unmatched requests fail locally. Use compatible third-party providers and start a new session after changing models; OpenAI Official routing is unsupported."
       },
       "modelId": "{{app}} Model ID",
       "modelPlaceholder": {
