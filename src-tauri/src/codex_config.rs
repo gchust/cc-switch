@@ -1063,6 +1063,7 @@ fn set_codex_native_web_search_field(config_text: &str, disable: bool) -> Result
 
 /// Generate Codex `model_catalog_json` from provider settings and inject/remove
 /// the top-level TOML field that points Codex to the generated file.
+#[cfg(test)]
 pub fn prepare_codex_config_text_with_model_catalog(
     settings: &Value,
     config_text: &str,
