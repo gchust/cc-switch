@@ -118,6 +118,16 @@ fn codex_catalog_settings_reject_web_search(settings: &Value) -> bool {
         })
 }
 const CODEX_MODEL_CATALOG_TEMPLATE_SLUG: &str = "gpt-5.5";
+const CODEX_OFFICIAL_FALLBACK_MODELS: &[(&str, &str, usize, &str)] = &[
+    ("gpt-5.6-sol", "GPT-5.6-Sol", 1, "list"),
+    ("gpt-5.6-terra", "GPT-5.6-Terra", 2, "list"),
+    ("gpt-5.6-luna", "GPT-5.6-Luna", 3, "list"),
+    ("gpt-5.5", "GPT-5.5", 7, "list"),
+    ("gpt-5.4", "GPT-5.4", 16, "list"),
+    ("gpt-5.4-mini", "GPT-5.4-Mini", 23, "list"),
+    ("gpt-5.2", "GPT-5.2", 29, "list"),
+    ("codex-auto-review", "Codex Auto Review", 43, "hide"),
+];
 
 /// Which Codex tool surface the generated model catalog should target.
 ///
@@ -831,7 +841,7 @@ fn codex_cli_candidates() -> Vec<PathBuf> {
     candidates
 }
 
-fn load_codex_model_template_from_bundled() -> Result<Option<Value>, AppError> {
+fn load_codex_official_model_catalog_from_bundled() -> Result<Option<Value>, AppError> {
     for candidate in codex_cli_candidates() {
         let candidate_label = candidate.to_string_lossy();
         let output = match Command::new(&candidate)
@@ -860,12 +870,22 @@ fn load_codex_model_template_from_bundled() -> Result<Option<Value>, AppError> {
                 continue;
             }
         };
-        if let Some(template) = find_codex_model_template(&catalog) {
-            return Ok(Some(template));
+        if catalog
+            .get("models")
+            .and_then(Value::as_array)
+            .is_some_and(|models| !models.is_empty())
+        {
+            return Ok(Some(catalog));
         }
     }
 
     Ok(None)
+}
+
+fn load_codex_model_template_from_bundled() -> Result<Option<Value>, AppError> {
+    Ok(load_codex_official_model_catalog_from_bundled()?
+        .as_ref()
+        .and_then(find_codex_model_template))
 }
 
 fn load_codex_model_template_static() -> Option<Value> {
@@ -877,6 +897,38 @@ fn load_codex_model_template_static() -> Option<Value> {
             None
         }
     }
+}
+
+fn load_codex_official_model_catalog_static() -> Result<Value, AppError> {
+    let template = load_codex_model_template_static().ok_or_else(|| {
+        AppError::Message("Bundled Codex official model template is unavailable".to_string())
+    })?;
+    let models = CODEX_OFFICIAL_FALLBACK_MODELS
+        .iter()
+        .map(|(slug, display_name, priority, visibility)| {
+            let mut model = template.clone();
+            if let Some(object) = model.as_object_mut() {
+                object.insert("slug".to_string(), json!(slug));
+                object.insert("display_name".to_string(), json!(display_name));
+                object.insert("description".to_string(), json!(display_name));
+                object.insert("priority".to_string(), json!(priority));
+                object.insert("visibility".to_string(), json!(visibility));
+            }
+            model
+        })
+        .collect::<Vec<_>>();
+    Ok(json!({ "models": models }))
+}
+
+fn load_codex_official_model_catalog() -> Result<Value, AppError> {
+    if let Some(catalog) = load_codex_official_model_catalog_from_bundled()? {
+        return Ok(catalog);
+    }
+
+    log::warn!(
+        "Codex bundled model catalog is unavailable; using the CC Switch official model snapshot"
+    );
+    load_codex_official_model_catalog_static()
 }
 
 /// Bundled clean template for native `/responses` providers. Unlike the
@@ -1046,15 +1098,34 @@ pub fn prepare_codex_config_text_with_model_catalog(
     }
 }
 
-/// Generate one Codex catalog from model rows owned by different providers.
-/// Each source is rendered with its own tool profile, then the resulting
-/// entries are merged into the single catalog file Codex supports.
+/// Generate one Codex catalog with the CLI's official bundled models as the
+/// immutable baseline. Provider-owned rows are rendered with their own tool
+/// profiles and appended only when their slug is absent from that baseline.
 pub(crate) fn codex_merged_model_catalog_from_sources(
     sources: &[CodexMergedCatalogSource],
+) -> Result<(Value, bool), AppError> {
+    let official_catalog = load_codex_official_model_catalog()?;
+    codex_merged_model_catalog_from_sources_with_official_catalog(sources, &official_catalog)
+}
+
+fn codex_merged_model_catalog_from_sources_with_official_catalog(
+    sources: &[CodexMergedCatalogSource],
+    official_catalog: &Value,
 ) -> Result<(Value, bool), AppError> {
     let mut seen = HashSet::new();
     let mut merged_models = Vec::new();
     let mut disable_web_search = false;
+
+    if let Some(models) = official_catalog.get("models").and_then(Value::as_array) {
+        for model in models {
+            let Some(slug) = model.get("slug").and_then(Value::as_str) else {
+                continue;
+            };
+            if seen.insert(slug.to_string()) {
+                merged_models.push(model.clone());
+            }
+        }
+    }
 
     for source in sources {
         let Some(catalog) = codex_model_catalog_from_settings(
@@ -1095,7 +1166,7 @@ pub(crate) fn codex_merged_model_catalog_from_sources(
 
     if merged_models.is_empty() {
         return Err(AppError::Message(
-            "Codex model routing did not produce any catalog entries".to_string(),
+            "Codex official and provider model catalogs did not produce any entries".to_string(),
         ));
     }
 
@@ -1257,42 +1328,6 @@ fn build_simplified_catalog_from_texts(config_text: &str, catalog_text: &str) ->
     Some(json!({ "models": entries }))
 }
 
-/// Decide the `config.toml` text to write during a takeover-off restore,
-/// projecting the model catalog **only when `settings` carries an inline
-/// `modelCatalog`**.
-///
-/// Restore feeds back a stored backup, and Codex backups come in two shapes that
-/// need opposite handling:
-///
-/// - **Snapshot backup** (`read_codex_live_settings`): `{ auth, config }` with no
-///   inline `modelCatalog`. Its `config.toml` text already carries whatever
-///   `model_catalog_json` pointer existed at backup time, and the generated
-///   catalog file on disk is untouched. Here we must keep the config **raw** —
-///   running catalog projection would see "no specs" and strip the live pointer.
-/// - **Provider-rebuilt backup** (`update_live_backup_from_provider`): the DB
-///   provider's settings, i.e. `{ auth, config (no pointer), modelCatalog
-///   (inline DB SSOT) }`. Here the pointer/catalog file must be (re)generated
-///   from the inline `modelCatalog`, or the mapping is lost on restore.
-///
-/// Gating on the presence of the inline `modelCatalog` key routes each shape
-/// correctly; an empty inline catalog still projects (and so correctly drops a
-/// now-stale pointer), while an absent key leaves the text untouched. This is
-/// **orthogonal to auth** — a provider-rebuilt backup can pair an inline
-/// `modelCatalog` with empty `auth.json` (the API key living in the config's
-/// `experimental_bearer_token`), so the caller must decide config projection
-/// independently of whether it writes or deletes `auth.json`.
-pub fn prepare_codex_live_config_text_with_optional_catalog(
-    settings: &Value,
-    config_text: &str,
-    profile: CodexCatalogToolProfile,
-) -> Result<String, AppError> {
-    if settings.get("modelCatalog").is_some() {
-        prepare_codex_config_text_with_model_catalog(settings, config_text, profile)
-    } else {
-        Ok(config_text.to_string())
-    }
-}
-
 pub fn write_codex_provider_live_with_catalog(
     settings: &Value,
     category: Option<&str>,
@@ -1300,11 +1335,23 @@ pub fn write_codex_provider_live_with_catalog(
     config_text: Option<&str>,
     profile: CodexCatalogToolProfile,
 ) -> Result<(), AppError> {
-    let prepared_config = config_text
-        .map(|text| prepare_codex_config_text_with_model_catalog(settings, text, profile))
-        .transpose()?;
+    let config_text = config_text.unwrap_or("");
+    let sources = settings
+        .pointer("/modelCatalog/models")
+        .and_then(Value::as_array)
+        .filter(|models| !models.is_empty())
+        .map(|_| {
+            vec![CodexMergedCatalogSource {
+                settings: settings.clone(),
+                config_text: config_text.to_string(),
+                profile,
+            }]
+        })
+        .unwrap_or_default();
+    let prepared_config =
+        project_codex_config_text_with_merged_model_catalog(config_text, &sources)?;
 
-    write_codex_live_for_provider(category, auth, prepared_config.as_deref())
+    write_codex_live_for_provider(category, auth, Some(&prepared_config))
 }
 
 /// Extract a provider-scoped `experimental_bearer_token` from Codex `config.toml`.
@@ -3265,6 +3312,60 @@ wire_api = "responses"
         assert!(
             disable_web_search,
             "the routed model itself must participate in the web-search safety decision"
+        );
+    }
+
+    #[test]
+    fn merged_catalog_uses_official_models_as_the_baseline() {
+        let official_catalog = json!({
+            "models": [
+                {
+                    "slug": "gpt-official",
+                    "display_name": "GPT Official",
+                    "priority": 1
+                },
+                {
+                    "slug": "shared-model",
+                    "display_name": "Official Shared Model",
+                    "priority": 2
+                }
+            ]
+        });
+        let source = CodexMergedCatalogSource {
+            settings: json!({
+                "modelCatalog": {
+                    "models": [
+                        {
+                            "model": "shared-model",
+                            "displayName": "Provider Override"
+                        },
+                        {
+                            "model": "grok-4.5",
+                            "displayName": "Grok 4.5"
+                        }
+                    ]
+                }
+            }),
+            config_text: String::new(),
+            profile: CodexCatalogToolProfile::NativeResponses,
+        };
+
+        let (catalog, _) = codex_merged_model_catalog_from_sources_with_official_catalog(
+            &[source],
+            &official_catalog,
+        )
+        .expect("merge official and provider catalogs");
+        let models = catalog["models"].as_array().expect("model array");
+        let slugs = models
+            .iter()
+            .filter_map(|model| model.get("slug").and_then(Value::as_str))
+            .collect::<Vec<_>>();
+
+        assert_eq!(slugs, vec!["gpt-official", "shared-model", "grok-4.5"]);
+        assert_eq!(
+            models[1].get("display_name").and_then(Value::as_str),
+            Some("Official Shared Model"),
+            "provider catalogs must only add models missing from the official baseline"
         );
     }
 

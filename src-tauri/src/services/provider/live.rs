@@ -872,19 +872,9 @@ pub(crate) fn prepare_codex_config_text_with_model_catalog_projection(
     config_text: &str,
     profile: crate::codex_config::CodexCatalogToolProfile,
 ) -> Result<String, AppError> {
-    let sources = build_codex_merged_catalog_sources(db)?;
-    if sources.is_empty() {
-        crate::codex_config::prepare_codex_config_text_with_model_catalog(
-            settings,
-            config_text,
-            profile,
-        )
-    } else {
-        crate::codex_config::project_codex_config_text_with_merged_model_catalog(
-            config_text,
-            &sources,
-        )
-    }
+    let mut sources = build_codex_merged_catalog_sources(db)?;
+    append_inline_codex_catalog_source(&mut sources, settings, config_text, profile);
+    crate::codex_config::project_codex_config_text_with_merged_model_catalog(config_text, &sources)
 }
 
 pub(crate) fn prepare_codex_live_config_text_with_optional_catalog_projection(
@@ -893,18 +883,27 @@ pub(crate) fn prepare_codex_live_config_text_with_optional_catalog_projection(
     config_text: &str,
     profile: crate::codex_config::CodexCatalogToolProfile,
 ) -> Result<String, AppError> {
-    let sources = build_codex_merged_catalog_sources(db)?;
-    if sources.is_empty() {
-        crate::codex_config::prepare_codex_live_config_text_with_optional_catalog(
-            settings,
-            config_text,
+    let mut sources = build_codex_merged_catalog_sources(db)?;
+    append_inline_codex_catalog_source(&mut sources, settings, config_text, profile);
+    crate::codex_config::project_codex_config_text_with_merged_model_catalog(config_text, &sources)
+}
+
+fn append_inline_codex_catalog_source(
+    sources: &mut Vec<crate::codex_config::CodexMergedCatalogSource>,
+    settings: &Value,
+    config_text: &str,
+    profile: crate::codex_config::CodexCatalogToolProfile,
+) {
+    let has_models = settings
+        .pointer("/modelCatalog/models")
+        .and_then(Value::as_array)
+        .is_some_and(|models| !models.is_empty());
+    if has_models {
+        sources.push(crate::codex_config::CodexMergedCatalogSource {
+            settings: settings.clone(),
+            config_text: config_text.to_string(),
             profile,
-        )
-    } else {
-        crate::codex_config::project_codex_config_text_with_merged_model_catalog(
-            config_text,
-            &sources,
-        )
+        });
     }
 }
 
@@ -916,28 +915,19 @@ pub(crate) fn write_codex_provider_live_with_catalog_projection(
     config_text: Option<&str>,
     profile: crate::codex_config::CodexCatalogToolProfile,
 ) -> Result<(), AppError> {
-    let prepared_config = config_text
-        .map(|config_text| {
-            prepare_codex_config_text_with_model_catalog_projection(
-                db,
-                settings,
-                config_text,
-                profile,
-            )
-        })
-        .transpose()?;
-    crate::codex_config::write_codex_live_for_provider(category, auth, prepared_config.as_deref())
+    let prepared_config = prepare_codex_config_text_with_model_catalog_projection(
+        db,
+        settings,
+        config_text.unwrap_or(""),
+        profile,
+    )?;
+    crate::codex_config::write_codex_live_for_provider(category, auth, Some(&prepared_config))
 }
 
-/// Re-project the single Codex catalog from every provider-owned model catalog,
-/// plus aliases synthesized by the exact model routing table. Returns false
-/// only when neither configured catalogs nor routed aliases exist.
+/// Re-project the single Codex catalog from the official bundled models, every
+/// provider-owned model catalog, and aliases synthesized by exact routing.
 pub(crate) fn project_codex_merged_model_catalog(db: &Database) -> Result<bool, AppError> {
     let sources = build_codex_merged_catalog_sources(db)?;
-    if sources.is_empty() {
-        return Ok(false);
-    }
-
     let config_text = crate::codex_config::read_and_validate_codex_config_text()?;
     let config_text = crate::codex_config::project_codex_config_text_with_merged_model_catalog(
         &config_text,
@@ -947,46 +937,10 @@ pub(crate) fn project_codex_merged_model_catalog(db: &Database) -> Result<bool, 
     Ok(true)
 }
 
-/// Restore the current provider's own catalog after the routing table is
-/// cleared, without replacing auth/base URL/current-provider fields.
-pub(crate) fn project_current_codex_provider_catalog(db: &Database) -> Result<bool, AppError> {
-    let provider = match crate::settings::get_effective_current_provider(db, &AppType::Codex)? {
-        Some(provider_id) => db.get_provider_by_id(&provider_id, AppType::Codex.as_str())?,
-        None => None,
-    };
-
-    let config_text = crate::codex_config::read_and_validate_codex_config_text()?;
-    let Some(provider) = provider else {
-        let config_text = crate::codex_config::prepare_codex_config_text_with_model_catalog(
-            &json!({}),
-            &config_text,
-            crate::codex_config::CodexCatalogToolProfile::ProxyChat,
-        )?;
-        crate::codex_config::write_codex_live_config_atomic(Some(&config_text))?;
-        return Ok(true);
-    };
-    let mut effective_provider = provider.clone();
-    effective_provider.settings_config =
-        build_effective_settings_with_common_config(db, &AppType::Codex, &provider)?;
-
-    let profile = crate::proxy::providers::resolve_codex_catalog_tool_profile(&effective_provider);
-    let config_text = crate::codex_config::prepare_codex_config_text_with_model_catalog(
-        &effective_provider.settings_config,
-        &config_text,
-        profile,
-    )?;
-    crate::codex_config::write_codex_live_config_atomic(Some(&config_text))?;
-    Ok(true)
-}
-
 pub(crate) fn refresh_codex_model_catalog_projection_unlocked(
     db: &Database,
 ) -> Result<bool, AppError> {
-    if project_codex_merged_model_catalog(db)? {
-        Ok(true)
-    } else {
-        project_current_codex_provider_catalog(db)
-    }
+    project_codex_merged_model_catalog(db)
 }
 
 pub(crate) fn strip_common_config_from_live_settings(
@@ -2392,8 +2346,30 @@ mod tests {
             .iter()
             .filter_map(|model| model.get("slug").and_then(Value::as_str))
             .collect::<Vec<_>>();
+        assert!(
+            first_slugs.contains(&"gpt-5.5"),
+            "the official Codex catalog must remain the merged baseline"
+        );
+        let provider_slugs = first_slugs
+            .iter()
+            .copied()
+            .filter(|slug| {
+                [
+                    "chat-upstream",
+                    "chat-unused",
+                    "chat-alias",
+                    "native-upstream",
+                    "native-special",
+                    "native-unused",
+                    "claude-upstream",
+                    "claude-unused",
+                    "claude-alias",
+                ]
+                .contains(slug)
+            })
+            .collect::<Vec<_>>();
         assert_eq!(
-            first_slugs,
+            provider_slugs,
             vec![
                 "chat-upstream",
                 "chat-unused",
@@ -2405,7 +2381,7 @@ mod tests {
                 "claude-unused",
                 "claude-alias",
             ],
-            "every provider catalog should be exposed, with routed aliases added"
+            "every provider catalog should be appended, with routed aliases added"
         );
 
         let model = |slug: &str| {
@@ -2510,8 +2486,25 @@ mod tests {
             .iter()
             .filter_map(|model| model.get("slug").and_then(Value::as_str))
             .collect::<Vec<_>>();
+        assert!(restored_slugs.contains(&"gpt-5.5"));
+        let provider_slugs = restored_slugs
+            .iter()
+            .copied()
+            .filter(|slug| {
+                [
+                    "chat-upstream",
+                    "chat-unused",
+                    "native-special",
+                    "native-upstream",
+                    "native-unused",
+                    "claude-upstream",
+                    "claude-unused",
+                ]
+                .contains(slug)
+            })
+            .collect::<Vec<_>>();
         assert_eq!(
-            restored_slugs,
+            provider_slugs,
             vec![
                 "chat-upstream",
                 "chat-unused",
@@ -2521,7 +2514,7 @@ mod tests {
                 "claude-upstream",
                 "claude-unused",
             ],
-            "clearing routes should keep every configured provider catalog visible"
+            "clearing routes should retain the official baseline and every configured provider catalog"
         );
         let restored_config = crate::codex_config::read_and_validate_codex_config_text()
             .expect("read config after clearing routes");
@@ -2591,7 +2584,8 @@ mod tests {
             .iter()
             .filter_map(|model| model.get("slug").and_then(Value::as_str))
             .collect::<Vec<_>>();
-        assert_eq!(slugs, vec!["grok-4.5"]);
+        assert!(slugs.contains(&"gpt-5.5"));
+        assert!(slugs.contains(&"grok-4.5"));
 
         let config = crate::codex_config::read_and_validate_codex_config_text()
             .expect("read projected config");
@@ -2606,7 +2600,7 @@ mod tests {
 
     #[test]
     #[serial]
-    fn clearing_routes_without_current_provider_removes_owned_projection() {
+    fn clearing_routes_without_current_provider_keeps_official_projection() {
         let _home = CodexProjectionTestHome::new();
         let db = Database::memory().expect("create memory db");
         crate::codex_config::write_codex_live_config_atomic(Some(
@@ -2615,7 +2609,7 @@ mod tests {
         .expect("write stale routed config");
 
         refresh_codex_model_catalog_projection_unlocked(&db)
-            .expect("clear projection without a current provider");
+            .expect("refresh official projection without a current provider");
 
         let config = crate::codex_config::read_and_validate_codex_config_text()
             .expect("read cleaned config");
@@ -2624,8 +2618,21 @@ mod tests {
             config.get("model_provider").and_then(toml::Value::as_str),
             Some("custom")
         );
-        assert!(config.get("model_catalog_json").is_none());
+        assert_eq!(
+            config
+                .get("model_catalog_json")
+                .and_then(toml::Value::as_str),
+            Some(crate::codex_config::CC_SWITCH_CODEX_MODEL_CATALOG_FILENAME)
+        );
         assert!(config.get("web_search").is_none());
+
+        let catalog: Value = read_json_file(&crate::codex_config::get_codex_model_catalog_path())
+            .expect("read official catalog");
+        assert!(catalog["models"]
+            .as_array()
+            .expect("official models")
+            .iter()
+            .any(|model| model.get("slug").and_then(Value::as_str) == Some("gpt-5.5")));
     }
 
     #[test]
