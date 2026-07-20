@@ -6438,8 +6438,8 @@ requires_openai_auth = true
             "catalog must contain provider B's model after switch; got: {slugs:?}"
         );
         assert!(
-            !slugs.contains(&"model-a"),
-            "catalog must not contain stale provider A model after switch; got: {slugs:?}"
+            slugs.contains(&"model-a"),
+            "catalog must retain provider A's configured model after switch; got: {slugs:?}"
         );
 
         let config_path = crate::codex_config::get_codex_config_path();
