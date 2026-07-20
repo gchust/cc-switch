@@ -111,6 +111,21 @@ pub fn reapply_current_codex_official_live(state: &AppState) -> Result<bool, App
 /// Provider business logic service
 pub struct ProviderService;
 
+fn provider_has_codex_model_catalog(provider: &Provider) -> bool {
+    provider
+        .settings_config
+        .pointer("/modelCatalog/models")
+        .and_then(Value::as_array)
+        .is_some_and(|models| {
+            models.iter().any(|model| {
+                model
+                    .get("model")
+                    .and_then(Value::as_str)
+                    .is_some_and(|model| !model.trim().is_empty())
+            })
+        })
+}
+
 /// Result of a provider switch operation, including any non-fatal warnings
 #[derive(Debug, serde::Serialize, Default)]
 #[serde(rename_all = "camelCase")]
@@ -1994,6 +2009,78 @@ requires_openai_auth = true
 
     #[test]
     #[serial]
+    fn codex_provider_catalog_lifecycle_refreshes_global_projection_without_routes() {
+        let _home = TempHome::new();
+        crate::settings::reload_settings().expect("reload settings");
+        let db = Arc::new(Database::memory().expect("create memory db"));
+        let state = AppState::new(db.clone());
+
+        let mut current = Provider::with_id(
+            "current".to_string(),
+            "Current".to_string(),
+            codex_settings("https://current.example/v1", "current-key"),
+            None,
+        );
+        current.meta = Some(ProviderMeta {
+            api_format: Some("openai_chat".to_string()),
+            ..Default::default()
+        });
+        db.save_provider(AppType::Codex.as_str(), &current)
+            .expect("save current provider");
+        db.set_current_provider(AppType::Codex.as_str(), &current.id)
+            .expect("select current provider");
+        crate::settings::set_current_provider(&AppType::Codex, Some(&current.id))
+            .expect("persist current provider");
+        write_live_with_common_config(db.as_ref(), &AppType::Codex, &current)
+            .expect("write current provider");
+
+        let mut grok = Provider::with_id(
+            "grok".to_string(),
+            "Grok".to_string(),
+            codex_settings("https://grok.example/v1", "grok-key"),
+            None,
+        );
+        grok.settings_config["modelCatalog"] = json!({
+            "models": [{ "model": "grok-4.5", "displayName": "Grok 4.5" }]
+        });
+        grok.meta = Some(ProviderMeta {
+            api_format: Some("openai_chat".to_string()),
+            ..Default::default()
+        });
+
+        ProviderService::add(&state, AppType::Codex, grok.clone(), false)
+            .expect("add non-current catalog provider");
+        let catalog: Value = read_json_file(&crate::codex_config::get_codex_model_catalog_path())
+            .expect("read catalog after add");
+        assert_eq!(catalog["models"][0]["slug"], "grok-4.5");
+        let live = crate::codex_config::read_and_validate_codex_config_text()
+            .expect("read live config after add");
+        assert!(live.contains("model_catalog_json"));
+
+        grok.settings_config["modelCatalog"] = json!({
+            "models": [{ "model": "grok-4.6", "displayName": "Grok 4.6" }]
+        });
+        ProviderService::update(&state, AppType::Codex, None, grok.clone())
+            .expect("update non-current catalog provider");
+        let catalog: Value = read_json_file(&crate::codex_config::get_codex_model_catalog_path())
+            .expect("read catalog after update");
+        let slugs = catalog["models"]
+            .as_array()
+            .expect("model array")
+            .iter()
+            .filter_map(|model| model.get("slug").and_then(Value::as_str))
+            .collect::<Vec<_>>();
+        assert_eq!(slugs, vec!["grok-4.6"]);
+
+        ProviderService::delete(&state, AppType::Codex, &grok.id)
+            .expect("delete non-current catalog provider");
+        let live = crate::codex_config::read_and_validate_codex_config_text()
+            .expect("read live config after delete");
+        assert!(!live.contains("model_catalog_json"));
+    }
+
+    #[test]
+    #[serial]
     fn delete_universal_rejects_routed_codex_child_before_parent_delete() {
         with_test_home(|state, _| {
             let mut universal = UniversalProvider::new(
@@ -2340,6 +2427,13 @@ impl ProviderService {
         if app_type.is_additive_mode() {
             Self::set_provider_live_config_managed(&mut provider, add_to_live);
         }
+        let previous_codex_provider = if matches!(app_type, AppType::Codex) {
+            state
+                .db
+                .get_provider_by_id(&provider.id, app_type.as_str())?
+        } else {
+            None
+        };
 
         // Save to database
         state.db.save_provider(app_type.as_str(), &provider)?;
@@ -2369,6 +2463,33 @@ impl ProviderService {
                 .db
                 .set_current_provider(app_type.as_str(), &provider.id)?;
             write_live_with_common_config(state.db.as_ref(), &app_type, &provider)?;
+        } else if matches!(app_type, AppType::Codex) && provider_has_codex_model_catalog(&provider)
+        {
+            let _catalog_guard = lock_codex_model_catalog_projection();
+            if let Err(err) = refresh_codex_model_catalog_projection_unlocked(state.db.as_ref()) {
+                let rollback_db = previous_codex_provider.as_ref().map_or_else(
+                    || state.db.delete_provider(app_type.as_str(), &provider.id),
+                    |previous_provider| {
+                        state.db.save_provider(app_type.as_str(), previous_provider)
+                    },
+                );
+                let rollback_projection = if rollback_db.is_ok() {
+                    refresh_codex_model_catalog_projection_unlocked(state.db.as_ref()).map(|_| ())
+                } else {
+                    Ok(())
+                };
+                return Err(match (rollback_db, rollback_projection) {
+                    (Ok(()), Ok(())) => AppError::Message(format!(
+                        "刷新 Codex 合并模型目录失败，新增供应商已回滚: {err}"
+                    )),
+                    (Err(rollback_err), _) => AppError::Message(format!(
+                        "刷新 Codex 合并模型目录失败: {err}; 新增供应商回滚也失败: {rollback_err}"
+                    )),
+                    (Ok(()), Err(rollback_err)) => AppError::Message(format!(
+                        "刷新 Codex 合并模型目录失败: {err}; 新增供应商已回滚，但恢复原目录失败: {rollback_err}"
+                    )),
+                });
+            }
         }
 
         Ok(true)
@@ -2539,6 +2660,12 @@ impl ProviderService {
         } else {
             false
         };
+        let affects_codex_merged_catalog = matches!(app_type, AppType::Codex)
+            && (is_routed_codex_target
+                || provider_has_codex_model_catalog(&provider)
+                || existing_provider
+                    .as_ref()
+                    .is_some_and(provider_has_codex_model_catalog));
 
         if is_current {
             let sync_current_provider = |provider: &Provider| -> Result<(), AppError> {
@@ -2612,7 +2739,7 @@ impl ProviderService {
             };
 
             if let Err(err) = sync_current_provider(&provider) {
-                if !is_routed_codex_target {
+                if !affects_codex_merged_catalog {
                     return Err(err);
                 }
 
@@ -2636,20 +2763,21 @@ impl ProviderService {
                 };
                 return Err(match (rollback_db, rollback_live) {
                     (Ok(()), Ok(())) => AppError::Message(format!(
-                        "更新当前 Codex 路由供应商失败，数据库与 Live 已回滚: {err}"
+                        "更新当前 Codex 供应商并刷新合并模型目录失败，数据库与 Live 已回滚: {err}"
                     )),
                     (Err(rollback_err), _) => AppError::Message(format!(
-                        "更新当前 Codex 路由供应商失败: {err}; 数据库回滚也失败: {rollback_err}"
+                        "更新当前 Codex 供应商并刷新合并模型目录失败: {err}; 数据库回滚也失败: {rollback_err}"
                     )),
                     (Ok(()), Err(rollback_err)) => AppError::Message(format!(
-                        "更新当前 Codex 路由供应商失败: {err}; 数据库已回滚，但恢复 Live 失败: {rollback_err}"
+                        "更新当前 Codex 供应商并刷新合并模型目录失败: {err}; 数据库已回滚，但恢复 Live 失败: {rollback_err}"
                     )),
                 });
             }
-        } else if is_routed_codex_target {
-            // A route-owned catalog is independent of the current provider.
-            // Editing any referenced target must therefore refresh the merged
-            // projection even when that target is not currently selected.
+        } else if affects_codex_merged_catalog {
+            // Every provider-owned catalog contributes to the global Codex
+            // projection. Editing one must refresh the merged file even when
+            // that provider is not currently selected. Routed providers also
+            // remain projection inputs for route-only aliases and metadata.
             let _catalog_guard = lock_codex_model_catalog_projection();
             if let Err(err) = refresh_codex_model_catalog_projection_unlocked(state.db.as_ref()) {
                 let rollback_db = existing_provider.as_ref().map_or_else(
@@ -2780,8 +2908,38 @@ impl ProviderService {
         let _codex_route_guard =
             matches!(app_type, AppType::Codex).then(lock_codex_model_catalog_projection);
         Self::ensure_provider_deletable(state, &app_type, id)?;
+        let existing = state.db.get_provider_by_id(id, app_type.as_str())?;
 
-        state.db.delete_provider(app_type.as_str(), id)
+        state.db.delete_provider(app_type.as_str(), id)?;
+        if matches!(app_type, AppType::Codex)
+            && existing
+                .as_ref()
+                .is_some_and(provider_has_codex_model_catalog)
+        {
+            if let Err(err) = refresh_codex_model_catalog_projection_unlocked(state.db.as_ref()) {
+                let rollback_db = existing.as_ref().map_or(Ok(()), |provider| {
+                    state.db.save_provider(app_type.as_str(), provider)
+                });
+                let rollback_projection = if rollback_db.is_ok() {
+                    refresh_codex_model_catalog_projection_unlocked(state.db.as_ref()).map(|_| ())
+                } else {
+                    Ok(())
+                };
+                return Err(match (rollback_db, rollback_projection) {
+                    (Ok(()), Ok(())) => AppError::Message(format!(
+                        "刷新 Codex 合并模型目录失败，供应商删除已回滚: {err}"
+                    )),
+                    (Err(rollback_err), _) => AppError::Message(format!(
+                        "刷新 Codex 合并模型目录失败: {err}; 供应商删除回滚也失败: {rollback_err}"
+                    )),
+                    (Ok(()), Err(rollback_err)) => AppError::Message(format!(
+                        "刷新 Codex 合并模型目录失败: {err}; 供应商删除已回滚，但恢复原目录失败: {rollback_err}"
+                    )),
+                });
+            }
+        }
+
+        Ok(())
     }
 
     /// Remove provider from live config only (for additive mode apps like OpenCode, OpenClaw)
@@ -4297,6 +4455,9 @@ impl ProviderService {
         } else {
             None
         };
+        let refresh_codex_catalog = codex_child
+            .as_ref()
+            .is_some_and(provider_has_codex_model_catalog);
 
         if claude_child.is_some() {
             state.db.delete_provider("claude", &claude_id)?;
@@ -4306,6 +4467,39 @@ impl ProviderService {
         }
         if gemini_child.is_some() {
             state.db.delete_provider("gemini", &gemini_id)?;
+        }
+
+        if refresh_codex_catalog {
+            if let Err(err) = refresh_codex_model_catalog_projection_unlocked(state.db.as_ref()) {
+                let rollback_db = (|| -> Result<(), AppError> {
+                    if let Some(provider) = claude_child.as_ref() {
+                        state.db.save_provider("claude", provider)?;
+                    }
+                    if let Some(provider) = codex_child.as_ref() {
+                        state.db.save_provider("codex", provider)?;
+                    }
+                    if let Some(provider) = gemini_child.as_ref() {
+                        state.db.save_provider("gemini", provider)?;
+                    }
+                    Ok(())
+                })();
+                let rollback_projection = if rollback_db.is_ok() {
+                    refresh_codex_model_catalog_projection_unlocked(state.db.as_ref()).map(|_| ())
+                } else {
+                    Ok(())
+                };
+                return Err(match (rollback_db, rollback_projection) {
+                    (Ok(()), Ok(())) => AppError::Message(format!(
+                        "刷新 Codex 合并模型目录失败，统一供应商删除已回滚: {err}"
+                    )),
+                    (Err(rollback_err), _) => AppError::Message(format!(
+                        "刷新 Codex 合并模型目录失败: {err}; 统一供应商删除回滚也失败: {rollback_err}"
+                    )),
+                    (Ok(()), Err(rollback_err)) => AppError::Message(format!(
+                        "刷新 Codex 合并模型目录失败: {err}; 统一供应商删除已回滚，但恢复原目录失败: {rollback_err}"
+                    )),
+                });
+            }
         }
 
         state.db.delete_universal_provider(id)
@@ -4325,13 +4519,6 @@ impl ProviderService {
         let claude_provider = provider.to_claude_provider();
         let codex_provider = provider.to_codex_provider();
         let gemini_provider = provider.to_gemini_provider();
-        let refresh_routed_codex_catalog = codex_provider.is_some()
-            && state
-                .db
-                .get_codex_model_provider_map()?
-                .values()
-                .any(|provider_id| provider_id == &codex_id);
-
         // 在首次写入前完成三个应用的碰撞与删除检查，失败时不产生部分同步。
         let claude_existing = Self::preflight_universal_child(
             state,
@@ -4348,6 +4535,17 @@ impl ProviderService {
             codex_provider.is_none(),
         )?;
         let codex_previous = codex_existing.clone();
+        let refresh_codex_catalog = state
+            .db
+            .get_codex_model_provider_map()?
+            .values()
+            .any(|provider_id| provider_id == &codex_id)
+            || codex_provider
+                .as_ref()
+                .is_some_and(provider_has_codex_model_catalog)
+            || codex_previous
+                .as_ref()
+                .is_some_and(provider_has_codex_model_catalog);
         let gemini_existing = Self::preflight_universal_child(
             state,
             &provider,
@@ -4389,7 +4587,7 @@ impl ProviderService {
             state.db.delete_provider("gemini", &gemini_id)?;
         }
 
-        if refresh_routed_codex_catalog {
+        if refresh_codex_catalog {
             if let Err(err) = refresh_codex_model_catalog_projection_unlocked(state.db.as_ref()) {
                 let rollback_db = codex_previous.as_ref().map_or_else(
                     || state.db.delete_provider("codex", &codex_id),
